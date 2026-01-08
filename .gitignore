@@ -1,0 +1,27 @@
+# Environment variables
+.env
+
+# Node modules
+node_modules/
+
+# Persistent panel data
+panel_data.json
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Backups
+*.backup
+index.js.*.backup
+
+# Stashed files
+stash/
+
+# IDE configs
+.cursor/
+.vscode/
