@@ -1,6 +1,6 @@
 # Dedi Bot Simple
 
-A streamlined Discord bot for managing Vultr VPS instances, designed for gaming communities to easily create, manage, and share game servers.
+A (AI-vibe-coded) Discord bot for managing Vultr VPS instances, designed for gaming communities to easily create, manage, and share game servers.
 
 ## Overview
 
