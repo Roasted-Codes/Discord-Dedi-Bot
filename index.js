@@ -493,22 +493,28 @@ let pendingPanelUpdate = false;
 
 // #region agent log
 const DEBUG_LOG = (location, message, data = {}) => {
-  const logEntry = {
-    location,
-    message,
-    data,
-    timestamp: Date.now(),
-    sessionId: 'debug-session',
-    runId: 'run1'
-  };
-  // Also log to console for immediate visibility
-  console.log(`[DEBUG] ${location}: ${message}`, data);
-  // Send to logging server
-  fetch('http://127.0.0.1:7242/ingest/67eea2e9-5833-41e9-8dae-a5bee6a132b2', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(logEntry)
-  }).catch(() => {}); // Silently ignore if logging server unavailable
+  try {
+    const logEntry = {
+      location,
+      message,
+      data,
+      timestamp: Date.now(),
+      sessionId: 'debug-session',
+      runId: 'run1'
+    };
+    // Also log to console for immediate visibility
+    console.log(`[DEBUG] ${location}: ${message}`, data);
+    // Send to logging server - wrap in try-catch to never throw
+    if (typeof fetch !== 'undefined') {
+      fetch('http://127.0.0.1:7242/ingest/67eea2e9-5833-41e9-8dae-a5bee6a132b2', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(logEntry)
+      }).catch(() => {}); // Silently ignore if logging server unavailable
+    }
+  } catch (e) {
+    // Never throw from DEBUG_LOG
+  }
 };
 // #endregion
 
@@ -2180,8 +2186,14 @@ async function updatePanel(interaction = null, channel = null) {
       }
     }
     
-    const content = await generatePanelContent(guild);
-    const components = await generatePanelComponents(true);
+    let content, components;
+    try {
+      content = await generatePanelContent(guild);
+      components = await generatePanelComponents(true);
+    } catch (genError) {
+      console.error('Error generating panel content/components:', genError);
+      throw genError; // Re-throw so it's caught by outer handler
+    }
     
     // If we have an interaction, ALWAYS respond to it first
     // This ensures the command responds even if we also update an existing panel
@@ -3046,63 +3058,11 @@ const panelCommand = {
     .setDescription('Show the server control panel with buttons'),
   
   async execute(interaction) {
-    // #region agent log
-    DEBUG_LOG('index.js:2844', 'Panel command execute entry', {
-      hypothesisId: 'A',
-      userId: interaction.user?.id,
-      channelId: interaction.channelId,
-      guildId: interaction.guildId
-    });
-    // #endregion
-    
-    // Defer reply first - required for editReply to work
     try {
-      await interaction.deferReply();
-      // #region agent log
-      DEBUG_LOG('index.js:2850', 'deferReply completed', { hypothesisId: 'A' });
-      // #endregion
-    } catch (deferError) {
-      // #region agent log
-      DEBUG_LOG('index.js:2853', 'deferReply failed', {
-        hypothesisId: 'A',
-        error: deferError.message,
-        code: deferError.code
-      });
-      // #endregion
-      throw deferError;
-    }
-    
-    try {
-      // #region agent log
-      DEBUG_LOG('index.js:2861', 'Calling updatePanel', { hypothesisId: 'A' });
-      // #endregion
       await updatePanel(interaction);
-      // #region agent log
-      DEBUG_LOG('index.js:2864', 'updatePanel completed successfully', { hypothesisId: 'A' });
-      // #endregion
     } catch (error) {
-      // #region agent log
-      DEBUG_LOG('index.js:2867', 'Panel command error', {
-        hypothesisId: 'A',
-        error: error.message,
-        code: error.code,
-        stack: error.stack?.substring(0, 200)
-      });
-      // #endregion
       console.error('Error executing panel command:', error);
-      
-      // Try to respond with error message
-      try {
-        await interaction.editReply('❌ There was an error displaying the control panel.');
-      } catch (replyError) {
-        // #region agent log
-        DEBUG_LOG('index.js:2878', 'Failed to send error reply', {
-          hypothesisId: 'A',
-          error: replyError.message
-        });
-        // #endregion
-        console.error('Failed to send error reply:', replyError);
-      }
+      await interaction.editReply('❌ There was an error displaying the control panel.');
     }
   }
 };
@@ -3202,9 +3162,11 @@ client.once('ready', async () => {
     
     // Also register to guild for immediate testing (if DISCORD_GUILD_ID is set)
     if (process.env.DISCORD_GUILD_ID) {
-      console.log(`Also registering commands to guild ${process.env.DISCORD_GUILD_ID} for immediate testing...`);
+      const guildId = String(process.env.DISCORD_GUILD_ID).trim();
+      console.log(`Also registering commands to guild ${guildId} for immediate testing...`);
+      
       await rest.put(
-        Routes.applicationGuildCommands(client.user.id, process.env.DISCORD_GUILD_ID),
+        Routes.applicationGuildCommands(client.user.id, guildId),
         { body: commands }
       );
       console.log(`Successfully registered ${commands.length} guild commands!`);
@@ -3213,6 +3175,9 @@ client.once('ready', async () => {
     console.log(`Successfully registered ${commands.length} application commands!`);
   } catch (error) {
     console.error('Error registering commands:', error);
+    if (error.response) {
+      console.error('Discord API response:', error.response.status, error.response.data);
+    }
   }
   
   // Restore persistent panel if it exists
@@ -3451,47 +3416,25 @@ client.on('interactionCreate', async interaction => {
       throw error;
     }
     
-    // Store original editReply for deferred reply cleanup
-    const originalEditReply = interaction.editReply;
-    
-    // Wrap interaction to make all editReply calls use temporary auto-deleting follow-ups
-    const cleanup = wrapInteractionForAutoDelete(interaction);
-    
     try {
       // Execute the command - this calls the execute() function in each command object
       await command.execute(interaction);
-      
-      // Edit deferred reply to minimal placeholder after command completes
-      // This prevents the placeholder from cluttering the channel
-      // Use original editReply since we want to edit the deferred message, not send a follow-up
-      try {
-        await originalEditReply.call(interaction, { content: 'Processing...', flags: MessageFlags.SuppressEmbeds });
-      } catch (error) {
-        // Ignore errors editing the placeholder - it's not critical
-        if (error.code !== 10008) {
-          console.log('Could not edit deferred reply placeholder:', error.message);
-        }
-      }
     } catch (error) {
       console.error(`Error executing command ${interaction.commandName}:`, error);
       
-      // Handle error response using auto-delete follow-up
+      // Handle error response
       try {
-        await sendAutoCleanupFollowUp(interaction, 'There was an error while executing this command.');
-      } catch (followUpError) {
-        // Fallback to ephemeral reply if follow-up fails
-        const replyMethod = interaction.replied || interaction.deferred
-          ? interaction.followUp
-          : interaction.reply;
-        
-        replyMethod.call(interaction, {
-          content: 'There was an error while executing this command.',
-          flags: MessageFlags.Ephemeral
-        }).catch(console.error);
+        if (interaction.deferred || interaction.replied) {
+          await interaction.editReply('There was an error while executing this command.');
+        } else {
+          await interaction.reply({
+            content: 'There was an error while executing this command.',
+            flags: MessageFlags.Ephemeral
+          });
+        }
+      } catch (replyError) {
+        console.error('Failed to send error message:', replyError);
       }
-    } finally {
-      // Always restore original editReply
-      cleanup();
     }
     return; // Exit early for command interactions
   }
