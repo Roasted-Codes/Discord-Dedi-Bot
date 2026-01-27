@@ -719,10 +719,7 @@ async function stopInstance(interaction, instanceId) {
  */
 async function restartInstance(interaction, instanceId) {
   try {
-    await interaction.editReply({
-      content: '🔄 Restarting the server. This may take a few minutes...',
-      components: []
-    });
+    await sendAutoCleanupFollowUp(interaction, '🔄 Restarting the server. This may take a few minutes...');
 
     await vultr.instances.rebootInstance({ "instance-id": instanceId });
 
@@ -732,18 +729,18 @@ async function restartInstance(interaction, instanceId) {
       try {
         const instance = await getInstance(instanceId);
         if (instance) {
-          interaction.editReply('✅ Server restart initiated successfully! The server should be back online shortly.');
+          sendAutoCleanupFollowUp(interaction, '✅ Server restart initiated successfully! The server should be back online shortly.');
         } else {
-          interaction.editReply('✅ Server restart initiated successfully!');
+          sendAutoCleanupFollowUp(interaction, '✅ Server restart initiated successfully!');
         }
       } catch (error) {
         // Even if we can't verify, the reboot command succeeded
-        interaction.editReply('✅ Server restart initiated successfully!');
+        sendAutoCleanupFollowUp(interaction, '✅ Server restart initiated successfully!');
       }
     }, 2000);
   } catch (error) {
     console.error('Error restarting server:', error);
-    interaction.editReply('❌ There was an error restarting the server.');
+    sendAutoCleanupFollowUp(interaction, '❌ There was an error restarting the server.');
   }
 }
 
@@ -3813,9 +3810,10 @@ client.on('interactionCreate', async interaction => {
       }
     }
     
-    // Defer for non-modal buttons
+    // Defer for non-modal buttons - use deferUpdate() to avoid creating a visible message
+    // This way, only the followUp messages appear (and they auto-delete)
     try {
-      await interaction.deferReply();
+      await interaction.deferUpdate();
     } catch (error) {
       // Interaction may have expired or already been responded to
       if (error.code === 10062) {
@@ -3833,53 +3831,47 @@ client.on('interactionCreate', async interaction => {
     }
     
     if (interaction.customId === 'cancel_restart') {
-      await interaction.editReply({
-        content: '❌ Restart cancelled.',
-        components: []
-      });
+      await sendAutoCleanupFollowUp(interaction, '❌ Restart cancelled.');
       return;
     }
     
     // Handle coin buttons (from DMs or panel)
     if (interaction.customId.startsWith('coin_')) {
       const coinInstanceId = interaction.customId.replace('coin_', '');
-      
+
       try {
         const trackedInstance = instanceState.getInstance(coinInstanceId);
         if (!trackedInstance || !trackedInstance.selfDestructTimer) {
-          return interaction.editReply({
-            content: '❌ This server does not have an active timer.'
-          });
+          return sendAutoCleanupFollowUp(interaction, '❌ This server does not have an active timer.');
         }
-        
+
         const timer = trackedInstance.selfDestructTimer;
         const newExpiresAt = timer.expiresAt + (SELF_DESTRUCT_COIN_MINUTES * 60 * 1000);
-        
+
         // Update timer
         timer.expiresAt = newExpiresAt;
         timer.extendedCount = (timer.extendedCount || 0) + 1;
-        
+
         instanceState.updateInstance(coinInstanceId, trackedInstance.status, {
           selfDestructTimer: timer
         });
-        
+
         const timeStr = formatRemainingTime(newExpiresAt);
         const serverName = trackedInstance.name || 'Unnamed Server';
-        
-        await interaction.editReply({
-          content: `💰 **Coin Inserted!**\n\n` +
-            `Server "${serverName}" timer extended by ${SELF_DESTRUCT_COIN_MINUTES} minutes.\n` +
-            `⏰💣 New time remaining: ${timeStr}`
-        });
-        
+
+        await sendAutoCleanupFollowUp(interaction,
+          `💰 **Coin Inserted!**\n\n` +
+          `Server "${serverName}" timer extended by ${SELF_DESTRUCT_COIN_MINUTES} minutes.\n` +
+          `⏰💣 New time remaining: ${timeStr}`
+        );
+
         // Update panel if it exists
         setTimeout(() => updatePanel(), 1000);
-        
+
       } catch (error) {
         console.error('Error handling coin button:', error);
-        return interaction.editReply({
-          content: '❌ There was an error inserting the coin.'
-        }).catch(() => {}); // Ignore errors if interaction already expired
+        return sendAutoCleanupFollowUp(interaction, '❌ There was an error inserting the coin.')
+          .catch(() => {}); // Ignore errors if interaction already expired
       }
       return;
     }
@@ -3906,24 +3898,24 @@ client.on('interactionCreate', async interaction => {
         // Show select menu for server to insert coin
         try {
           const vultrInstances = await listInstances();
-          const activeInstances = vultrInstances.filter(instance => 
+          const activeInstances = vultrInstances.filter(instance =>
             instance.status !== 'destroyed' && instance.power_status !== 'destroyed'
           );
-          
+
           if (!activeInstances?.length) {
-            return interaction.editReply('No active servers found.');
+            return sendAutoCleanupFollowUp(interaction, 'No active servers found.');
           }
-          
+
           // Filter to only servers with timers
           const instancesWithTimers = activeInstances.filter(instance => {
             const tracked = instanceState.getInstance(instance.id);
             return tracked?.selfDestructTimer;
           });
-          
+
           if (!instancesWithTimers.length) {
-            return interaction.editReply('No servers with active timers found.');
+            return sendAutoCleanupFollowUp(interaction, 'No servers with active timers found.');
           }
-          
+
           const options = instancesWithTimers.map(instance => {
             const tracked = instanceState.getInstance(instance.id);
             const timer = tracked.selfDestructTimer;
@@ -3934,7 +3926,7 @@ client.on('interactionCreate', async interaction => {
               value: instance.id
             };
           });
-          
+
           const row = new ActionRowBuilder()
             .addComponents(
               new StringSelectMenuBuilder()
@@ -3942,14 +3934,14 @@ client.on('interactionCreate', async interaction => {
                 .setPlaceholder('Select a server to insert coin')
                 .addOptions(options)
             );
-          
-          return interaction.editReply({
+
+          return sendAutoCleanupFollowUp(interaction, {
             content: `💰 **Insert Coin**\n\nSelect a server to extend its timer by ${SELF_DESTRUCT_COIN_MINUTES} minutes:`,
             components: [row]
           });
         } catch (error) {
           console.error('Error handling insert coin:', error);
-          return interaction.editReply('❌ There was an error processing the insert coin request.');
+          return sendAutoCleanupFollowUp(interaction, '❌ There was an error processing the insert coin request.');
         }
         
       default:
@@ -3981,14 +3973,14 @@ client.on('interactionCreate', async interaction => {
             await executeCreateFromPanel(interaction, serverName, regionId, cityName);
           } catch (error) {
             console.error('Error handling quick action button:', error);
-            await interaction.editReply('❌ Error processing quick action. Please try again.');
+            await sendAutoCleanupFollowUp(interaction, '❌ Error processing quick action. Please try again.');
           }
           break;
         }
-        
+
         // If we reach here, it's an unknown button
         console.error(`Unknown button interaction: ${interaction.customId}`);
-        return interaction.editReply('❌ Unknown button action.');
+        return sendAutoCleanupFollowUp(interaction, '❌ Unknown button action.');
     }
     return;
   }

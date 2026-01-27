@@ -18,6 +18,7 @@ Thumbs.db
 # Backups
 *.backup
 index.js.*.backup
+index.legacy.js
 
 # Stashed files
 stash/
