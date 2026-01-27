@@ -132,6 +132,19 @@ All functionality is consolidated in `index.js` with clear section headers:
 - Discord Bot API - For slash commands and interactive components
 - Vultr API - For VPS instance management, snapshots, regions, and billing
 
+## Documentation Practices
+
+### KNOWN_ISSUES.md Maintenance
+When updating `documentation/KNOWN_ISSUES.md`, always:
+1. Update the **Last Updated** date at the top of the file
+2. Update the **Status** line with a brief summary (e.g., "2 of 7 issues fixed. Critical bugs remain.")
+3. Move fixed issues to the **Fixed Issues** section with the fix date
+4. Add an entry to the **Changelog** table at the bottom
+
+This ensures the document stays current and provides at-a-glance project health status.
+
+---
+
 ## Development Notes
 
 ### File Structure
