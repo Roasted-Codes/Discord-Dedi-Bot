@@ -12,7 +12,7 @@ import {
 } from './config/constants.js';
 import { createDiscordClient, REST, Routes, ActionRowBuilder, ButtonBuilder, ButtonStyle, StringSelectMenuBuilder } from './discord/client.js';
 import { commands, registerCommands } from './discord/commands/index.js';
-import { setupHandlers, setDestructionPollingFunction, setPanelExecutors, setModalPanelFunction } from './discord/handlers/index.js';
+import { setupHandlers, setDestructionPollingFunction, setPanelExecutors, setModalPanelFunction, setQuickCreateWithTimerFunction } from './discord/handlers/index.js';
 import { setPollingFunction } from './discord/commands/create.js';
 import { setSnapshotPollingFunction } from './discord/commands/snapshot.js';
 import { setPanelFunction } from './discord/commands/panel.js';
@@ -45,19 +45,28 @@ async function initializeSelfDestructTimer(instanceId) {
 
   if (trackedInstance.selfDestructTimer) return;
 
+  // Use custom timer if set, otherwise use default
+  const timerMinutes = trackedInstance.timerMinutes ?? SELF_DESTRUCT_INITIAL_MINUTES;
+
+  // timerMinutes of 0 means no timer
+  if (timerMinutes === 0) {
+    logger.debug(`No timer set for ${instanceId.slice(0, 8)}...`);
+    return;
+  }
+
   const now = Date.now();
-  const expiresAt = now + (SELF_DESTRUCT_INITIAL_MINUTES * 60 * 1000);
+  const expiresAt = now + (timerMinutes * 60 * 1000);
 
   instanceState.updateInstance(instanceId, trackedInstance.status, {
     selfDestructTimer: {
       expiresAt,
-      initialDuration: SELF_DESTRUCT_INITIAL_MINUTES * 60 * 1000,
+      initialDuration: timerMinutes * 60 * 1000,
       extendedCount: 0,
       warningsSent: []
     }
   });
 
-  logger.debug(`Timer set for ${instanceId.slice(0, 8)}...: ${SELF_DESTRUCT_INITIAL_MINUTES}min`);
+  logger.debug(`Timer set for ${instanceId.slice(0, 8)}...: ${timerMinutes}min`);
 }
 
 async function startInstanceStatusPolling(instanceId, serverName, region, interaction, message, sendDM = true) {
@@ -411,11 +420,20 @@ async function updatePanel(interaction = null, channel = null) {
     const stats = await getServerStats();
     const components = await generatePanelComponents(true);
 
+    const timestamp = new Date().toLocaleTimeString('en-GB', {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      timeZone: 'UTC'
+    }) + ' GMT';
+
     const content =
       `**Server Control Panel**\n` +
       `Running: ${stats.running} | Stopped: ${stats.stopped} | Total: ${stats.total}\n\n` +
       `${serverContent}\n\n` +
-      `*Quick Create: Click a city button to create a server there*`;
+      `*Quick Create: Click a city button to create a server there*\n\n` +
+      `─────────────────\n` +
+      `✅ Online • ${timestamp}`;
 
     // Update or create panel message
     if (panelData.messageId) {
@@ -528,6 +546,44 @@ async function executeQuickCreate(interaction, regionId) {
     if (cityName !== regionId.toUpperCase()) break;
   }
 
+  // Show timer selection dropdown
+  const timerOptions = [
+    { label: '30 minutes', value: `${regionId}_30` },
+    { label: '1 hour', value: `${regionId}_60` },
+    { label: '2 hours', value: `${regionId}_120` },
+    { label: '3 hours', value: `${regionId}_180` },
+    { label: 'No timer', value: `${regionId}_0` }
+  ];
+
+  const row = new ActionRowBuilder()
+    .addComponents(
+      new StringSelectMenuBuilder()
+        .setCustomId('timer_select')
+        .setPlaceholder('Select server lifetime')
+        .addOptions(timerOptions)
+    );
+
+  return sendAutoCleanupFollowUp(interaction, {
+    content: `**Create Server in ${cityName}**\n\nHow long should this server run before auto-destruct?`,
+    components: [row]
+  });
+}
+
+async function executeQuickCreateWithTimer(interaction, regionId, timerMinutes) {
+  const groupedRegions = await getGroupedRegions();
+  let cityName = regionId.toUpperCase();
+
+  for (const [continent, countries] of Object.entries(groupedRegions)) {
+    for (const [country, cities] of Object.entries(countries)) {
+      const city = cities.find(c => c.id === regionId);
+      if (city) {
+        cityName = city.city;
+        break;
+      }
+    }
+    if (cityName !== regionId.toUpperCase()) break;
+  }
+
   const serverName = `${interaction.user.username}'s ${cityName} Server`;
 
   try {
@@ -552,7 +608,7 @@ async function executeQuickCreate(interaction, regionId) {
         interaction.user.id,
         interaction.user.username,
         'creating',
-        { name: serverName, region: regionId }
+        { name: serverName, region: regionId, timerMinutes }
       );
 
       startInstanceStatusPolling(instance.id, serverName, regionId, interaction, null, true);
@@ -671,10 +727,12 @@ setSnapshotPollingFunction(startSnapshotStatusPolling);
 setPanelFunction(updatePanel);
 setDestructionPollingFunction(startInstanceDestructionPolling);
 setModalPanelFunction(updatePanel);
+setQuickCreateWithTimerFunction(executeQuickCreateWithTimer);
 setPanelExecutors({
   destroy: executeDestroyFromPanel,
   restart: executeRestartFromPanel,
-  quickCreate: executeQuickCreate
+  quickCreate: executeQuickCreate,
+  quickCreateWithTimer: executeQuickCreateWithTimer
 });
 
 // ============================================================================

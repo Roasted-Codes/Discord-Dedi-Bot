@@ -14,7 +14,7 @@ export const SELF_DESTRUCT_INITIAL_MINUTES = parseInt(process.env.SELF_DESTRUCT_
 export const SELF_DESTRUCT_COIN_MINUTES = parseInt(process.env.SELF_DESTRUCT_COIN_MINUTES) || 180; // 3 hours default
 
 // Panel refresh interval
-export const PANEL_REFRESH_INTERVAL_MS = 3000; // 3 seconds
+export const PANEL_REFRESH_INTERVAL_MS = 10000; // 10 seconds
 
 // Polling intervals
 export const INSTANCE_POLL_INTERVAL_MS = 45000;

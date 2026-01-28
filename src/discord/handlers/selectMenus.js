@@ -18,9 +18,14 @@ import { logger } from '../../utils/logger.js';
 
 // Will be set by main entry point
 let startInstanceDestructionPolling = null;
+let quickCreateWithTimer = null;
 
 export function setDestructionPollingFunction(fn) {
   startInstanceDestructionPolling = fn;
+}
+
+export function setQuickCreateWithTimerFunction(fn) {
+  quickCreateWithTimer = fn;
 }
 
 export async function handleSelectMenu(interaction) {
@@ -34,8 +39,37 @@ export async function handleSelectMenu(interaction) {
     case 'insert_coin_server':
       await handleInsertCoin(interaction);
       break;
+    case 'timer_select':
+      await handleTimerSelect(interaction);
+      break;
     default:
       logger.warn(`Unknown select menu: ${interaction.customId}`);
+  }
+}
+
+async function handleTimerSelect(interaction) {
+  try {
+    await interaction.deferUpdate();
+  } catch (e) {
+    if (e.code === 10062) return;
+    throw e;
+  }
+
+  // Value format: "regionId_minutes" (e.g., "dfw_60")
+  const [regionId, minutesStr] = interaction.values[0].split('_');
+  const timerMinutes = parseInt(minutesStr, 10);
+
+  // Clear the dropdown message
+  try {
+    await interaction.deleteReply();
+  } catch {
+    // Ignore if already deleted
+  }
+
+  if (quickCreateWithTimer) {
+    await quickCreateWithTimer(interaction, regionId, timerMinutes);
+  } else {
+    logger.error('quickCreateWithTimer function not set');
   }
 }
 
