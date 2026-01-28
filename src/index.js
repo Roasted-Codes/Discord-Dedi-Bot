@@ -10,7 +10,9 @@ import {
   SELF_DESTRUCT_COIN_MINUTES,
   PANEL_REFRESH_INTERVAL_MS
 } from './config/constants.js';
-import { createDiscordClient, REST, Routes, ActionRowBuilder, ButtonBuilder, ButtonStyle, StringSelectMenuBuilder } from './discord/client.js';
+import { createDiscordClient, REST, Routes, ActionRowBuilder, ButtonBuilder, ButtonStyle, StringSelectMenuBuilder, AttachmentBuilder } from './discord/client.js';
+import { fileURLToPath } from 'url';
+import path from 'path';
 import { commands, registerCommands } from './discord/commands/index.js';
 import { setupHandlers, setDestructionPollingFunction, setPanelExecutors, setModalPanelFunction, setQuickCreateWithTimerFunction, setModalQuickCreateFunction } from './discord/handlers/index.js';
 import { setPollingFunction } from './discord/commands/create.js';
@@ -34,6 +36,10 @@ const client = createDiscordClient();
 
 // Track cleanup functions for graceful shutdown
 const cleanupFunctions = [];
+
+// Banner image path
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const bannerPath = path.join(__dirname, '../assets/h2_banner.png');
 
 // ============================================================================
 // POLLING FUNCTIONS
@@ -428,27 +434,28 @@ async function updatePanel(interaction = null, channel = null) {
     }) + ' GMT';
 
     const content =
-      `**Server Control Panel**\n` +
-      `Running: ${stats.running} | Stopped: ${stats.stopped} | Total: ${stats.total}\n\n` +
-      `${serverContent}\n\n` +
-      `*Quick Create: Click a city button to create a server there*\n\n` +
+      `Running: ${stats.running} | Stopped: ${stats.stopped} | Total: ${stats.total}\n` +
+      `${serverContent}\n` +
+      `*Quick Create: Click a city button*\n` +
       `─────────────────\n` +
       `✅ Online • ${timestamp}`;
+
+    const banner = new AttachmentBuilder(bannerPath);
 
     // Update or create panel message
     if (panelData.messageId) {
       try {
         const message = await targetChannel.messages.fetch(panelData.messageId);
-        await message.edit({ content, components });
+        await message.edit({ content, files: [banner], components });
       } catch (e) {
         // Message deleted, create new one
-        const newMessage = await targetChannel.send({ content, components });
+        const newMessage = await targetChannel.send({ content, files: [banner], components });
         panelData.messageId = newMessage.id;
         panelData.channelId = targetChannel.id;
         savePanelData();
       }
     } else {
-      const newMessage = await targetChannel.send({ content, components });
+      const newMessage = await targetChannel.send({ content, files: [banner], components });
       panelData.messageId = newMessage.id;
       panelData.channelId = targetChannel.id;
       savePanelData();

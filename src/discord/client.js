@@ -19,7 +19,8 @@ import {
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
-  MessageFlags
+  MessageFlags,
+  AttachmentBuilder
 } from 'discord.js';
 
 /**
@@ -52,5 +53,6 @@ export {
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
-  MessageFlags
+  MessageFlags,
+  AttachmentBuilder
 };
