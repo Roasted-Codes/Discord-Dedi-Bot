@@ -221,10 +221,12 @@ async function handleDestroyServer(interaction) {
     const serverName = instance.label || 'Unnamed Server';
     const formattedCost = await calculateInstanceCost(instance);
 
-    await interaction.editReply({
-      content: `Attempting to destroy server "${serverName}"...\nChecking if Vultr allows deletion...`,
-      components: []
-    });
+    // Clear the select menu immediately - panel will show updates
+    try {
+      await interaction.deleteReply();
+    } catch {
+      // Ignore if already deleted
+    }
 
     try {
       await vultr.instances.deleteInstance({ "instance-id": destroyId });
@@ -240,23 +242,15 @@ async function handleDestroyServer(interaction) {
         startInstanceDestructionPolling(destroyId, serverName, formattedCost, interaction);
       } else {
         instanceState.updateInstance(destroyId, 'destroyed');
-        await interaction.editReply(`Server "${serverName}" destroyed!\nCost: ${formattedCost}`);
       }
 
     } catch (deleteError) {
-      if (deleteError.response?.status === 400) {
-        return interaction.editReply(
-          `Cannot destroy server "${serverName}" right now.\n` +
-          `Vultr is preventing deletion (likely due to active processes)\n` +
-          `Try again in a few minutes\n` +
-          `Estimated cost so far: ${formattedCost}`
-        );
-      }
-      return interaction.editReply(
-        `Error destroying server "${serverName}".\n` +
-        `API Error: ${deleteError.message}\n` +
-        `Estimated cost so far: ${formattedCost}`
-      );
+      // Show errors as ephemeral followup since original reply was deleted
+      const errorMsg = deleteError.response?.status === 400
+        ? `Cannot destroy "${serverName}" - Vultr preventing deletion. Try again in a few minutes.`
+        : `Error destroying "${serverName}": ${deleteError.message}`;
+
+      await interaction.followUp({ content: errorMsg, ephemeral: true });
     }
   } catch (error) {
     logger.error('Error destroying server:', error.message);
