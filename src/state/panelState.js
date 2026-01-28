@@ -52,15 +52,5 @@ export function savePanelData() {
   }
 }
 
-/**
- * Clear panel data
- */
-export function clearPanelData() {
-  panelData.messageId = null;
-  panelData.channelId = null;
-  panelData.lastUpdate = null;
-  savePanelData();
-}
-
 // Load on module initialization
 loadPanelData();

@@ -85,16 +85,5 @@ export const instanceState = {
    */
   getInstance(instanceId) {
     return this.instances.find(i => i.id === instanceId);
-  },
-
-  /**
-   * Get all instances for a specific user
-   * @param {string} userId - Discord user ID
-   */
-  getUserInstances(userId) {
-    return this.instances.filter(i => i.creator.id === userId);
   }
 };
-
-// Server creation state - tracks in-progress creations
-export const serverCreationState = new Map();
