@@ -4,7 +4,7 @@
  * Handles string select menu interactions.
  */
 
-import { ActionRowBuilder, ButtonBuilder, ButtonStyle } from 'discord.js';
+import { ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle } from 'discord.js';
 import {
   getInstance,
   isCurrentServer,
@@ -48,6 +48,36 @@ export async function handleSelectMenu(interaction) {
 }
 
 async function handleTimerSelect(interaction) {
+  // Value format: "regionId_minutes" or "regionId_custom"
+  const [regionId, minutesStr] = interaction.values[0].split('_');
+
+  // Handle custom timer - show modal (don't defer, modal needs fresh interaction)
+  if (minutesStr === 'custom') {
+    const modal = new ModalBuilder()
+      .setCustomId(`custom_timer_modal_${regionId}`)
+      .setTitle('Custom Server Timer');
+
+    const minutesInput = new TextInputBuilder()
+      .setCustomId('timer_minutes')
+      .setLabel('Timer duration in minutes (0 = no timer)')
+      .setStyle(TextInputStyle.Short)
+      .setPlaceholder('210')
+      .setRequired(true)
+      .setMaxLength(4);
+
+    const row = new ActionRowBuilder().addComponents(minutesInput);
+    modal.addComponents(row);
+
+    try {
+      await interaction.showModal(modal);
+    } catch (e) {
+      if (e.code === 10062) return;
+      throw e;
+    }
+    return;
+  }
+
+  // Standard timer selection
   try {
     await interaction.deferUpdate();
   } catch (e) {
@@ -55,8 +85,6 @@ async function handleTimerSelect(interaction) {
     throw e;
   }
 
-  // Value format: "regionId_minutes" (e.g., "dfw_60")
-  const [regionId, minutesStr] = interaction.values[0].split('_');
   const timerMinutes = parseInt(minutesStr, 10);
 
   // Clear the dropdown message

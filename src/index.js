@@ -12,7 +12,7 @@ import {
 } from './config/constants.js';
 import { createDiscordClient, REST, Routes, ActionRowBuilder, ButtonBuilder, ButtonStyle, StringSelectMenuBuilder } from './discord/client.js';
 import { commands, registerCommands } from './discord/commands/index.js';
-import { setupHandlers, setDestructionPollingFunction, setPanelExecutors, setModalPanelFunction, setQuickCreateWithTimerFunction } from './discord/handlers/index.js';
+import { setupHandlers, setDestructionPollingFunction, setPanelExecutors, setModalPanelFunction, setQuickCreateWithTimerFunction, setModalQuickCreateFunction } from './discord/handlers/index.js';
 import { setPollingFunction } from './discord/commands/create.js';
 import { setSnapshotPollingFunction } from './discord/commands/snapshot.js';
 import { setPanelFunction } from './discord/commands/panel.js';
@@ -548,11 +548,8 @@ async function executeQuickCreate(interaction, regionId) {
 
   // Show timer selection dropdown
   const timerOptions = [
-    { label: '30 minutes', value: `${regionId}_30` },
-    { label: '1 hour', value: `${regionId}_60` },
-    { label: '2 hours', value: `${regionId}_120` },
-    { label: '3 hours', value: `${regionId}_180` },
-    { label: 'No timer', value: `${regionId}_0` }
+    { label: '3.5 hours (Recommended)', value: `${regionId}_210` },
+    { label: 'Custom time...', value: `${regionId}_custom` }
   ];
 
   const row = new ActionRowBuilder()
@@ -728,6 +725,7 @@ setPanelFunction(updatePanel);
 setDestructionPollingFunction(startInstanceDestructionPolling);
 setModalPanelFunction(updatePanel);
 setQuickCreateWithTimerFunction(executeQuickCreateWithTimer);
+setModalQuickCreateFunction(executeQuickCreateWithTimer);
 setPanelExecutors({
   destroy: executeDestroyFromPanel,
   restart: executeRestartFromPanel,

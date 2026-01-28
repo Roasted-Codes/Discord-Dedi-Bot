@@ -9,12 +9,46 @@ import { logger } from '../../utils/logger.js';
 
 // Will be set by main entry point
 let updatePanel = null;
+let quickCreateWithTimer = null;
 
 export function setModalPanelFunction(fn) {
   updatePanel = fn;
 }
 
+export function setModalQuickCreateFunction(fn) {
+  quickCreateWithTimer = fn;
+}
+
 export async function handleModal(interaction) {
+  // Handle custom timer modal (no defer - needs ephemeral handling)
+  if (interaction.customId.startsWith('custom_timer_modal_')) {
+    const regionId = interaction.customId.replace('custom_timer_modal_', '');
+    const minutesStr = interaction.fields.getTextInputValue('timer_minutes');
+    const timerMinutes = parseInt(minutesStr, 10);
+
+    if (isNaN(timerMinutes) || timerMinutes < 0) {
+      try {
+        await interaction.reply({ content: 'Invalid timer value. Please enter a number.', ephemeral: true });
+      } catch (e) { /* ignore */ }
+      return;
+    }
+
+    try {
+      await interaction.deferReply();
+    } catch (e) {
+      if (e.code === 10062) return;
+      throw e;
+    }
+
+    if (quickCreateWithTimer) {
+      await quickCreateWithTimer(interaction, regionId, timerMinutes);
+    } else {
+      logger.error('quickCreateWithTimer function not set in modals');
+      await interaction.editReply('Error: Server creation not available.');
+    }
+    return;
+  }
+
   try {
     await interaction.deferReply();
   } catch (error) {
