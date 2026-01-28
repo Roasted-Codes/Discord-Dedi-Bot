@@ -1,19 +1,18 @@
 /**
  * Autocomplete Handler
  *
- * Handles autocomplete interactions for city, server, and snapshot selection.
+ * Handles autocomplete interactions for city and server selection.
  */
 
-import { getGroupedRegions, listInstances, getPublicSnapshots, getCleanSnapshotName } from '../../vultr/index.js';
+import { getGroupedRegions, listInstances } from '../../vultr/index.js';
 import { logger } from '../../utils/logger.js';
 
 export async function handleAutocomplete(interaction) {
   const focusedOption = interaction.options.getFocused(true);
 
   try {
-    // City autocomplete for /create and /restore
-    if ((interaction.commandName === 'create' || interaction.commandName === 'restore') &&
-        focusedOption.name === 'city') {
+    // City autocomplete for /create
+    if (interaction.commandName === 'create' && focusedOption.name === 'city') {
       const focusedValue = focusedOption.value;
       const groupedRegions = await getGroupedRegions();
 
@@ -54,26 +53,6 @@ export async function handleAutocomplete(interaction) {
         .slice(0, 25);
 
       return await interaction.respond(servers);
-    }
-
-    // Snapshot autocomplete for /restore
-    if (interaction.commandName === 'restore' && focusedOption.name === 'snapshot') {
-      const focusedValue = focusedOption.value;
-      const publicSnapshots = await getPublicSnapshots();
-
-      const snapshots = publicSnapshots
-        .filter(snapshot => {
-          const cleanName = getCleanSnapshotName(snapshot);
-          return cleanName.toLowerCase().includes(focusedValue.toLowerCase()) ||
-                 snapshot.id.toLowerCase().includes(focusedValue.toLowerCase());
-        })
-        .map(snapshot => ({
-          name: `${getCleanSnapshotName(snapshot)} (${snapshot.status})`,
-          value: snapshot.id
-        }))
-        .slice(0, 25);
-
-      return await interaction.respond(snapshots);
     }
 
   } catch (error) {

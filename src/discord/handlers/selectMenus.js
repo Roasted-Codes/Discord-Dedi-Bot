@@ -9,13 +9,10 @@ import {
   getInstance,
   isCurrentServer,
   calculateInstanceCost,
-  startInstanceApi,
-  stopInstanceApi,
   vultr
 } from '../../vultr/index.js';
 import { instanceState } from '../../state/instanceState.js';
-import { formatInstanceDetails, formatRemainingTime } from '../../utils/formatters.js';
-import { sendAutoCleanupFollowUp } from '../../services/notifications.js';
+import { formatRemainingTime } from '../../utils/formatters.js';
 import { SELF_DESTRUCT_COIN_MINUTES } from '../../config/constants.js';
 import { logger } from '../../utils/logger.js';
 
@@ -28,15 +25,6 @@ export function setDestructionPollingFunction(fn) {
 
 export async function handleSelectMenu(interaction) {
   switch (interaction.customId) {
-    case 'select_server':
-      await handleSelectServer(interaction);
-      break;
-    case 'start_server':
-      await handleStartServer(interaction);
-      break;
-    case 'stop_server':
-      await handleStopServer(interaction);
-      break;
     case 'restart_server':
       await handleRestartServer(interaction);
       break;
@@ -48,98 +36,6 @@ export async function handleSelectMenu(interaction) {
       break;
     default:
       logger.warn(`Unknown select menu: ${interaction.customId}`);
-  }
-}
-
-async function handleSelectServer(interaction) {
-  try {
-    await interaction.deferUpdate();
-  } catch (e) {
-    if (e.code === 10062) return;
-    throw e;
-  }
-
-  const selectedId = interaction.values[0];
-
-  try {
-    const instance = await getInstance(selectedId);
-    if (!instance) {
-      return interaction.editReply({
-        content: 'This server is not available for management.',
-        components: []
-      });
-    }
-
-    const trackedInstance = instanceState.getInstance(selectedId);
-    const formattedStatus = formatInstanceDetails(trackedInstance, instance);
-    return interaction.editReply({
-      content: formattedStatus,
-      components: []
-    });
-  } catch (error) {
-    logger.error('Error handling server selection:', error.message);
-    return interaction.editReply({
-      content: 'There was an error getting the server status.',
-      components: []
-    });
-  }
-}
-
-async function handleStartServer(interaction) {
-  try {
-    await interaction.deferUpdate();
-  } catch (e) {
-    if (e.code === 10062) return;
-    throw e;
-  }
-
-  const instanceId = interaction.values[0];
-
-  try {
-    await interaction.editReply({
-      content: 'Starting the server. This may take a few minutes...',
-      components: []
-    });
-
-    const success = await startInstanceApi(instanceId);
-    if (success) {
-      instanceState.updateInstance(instanceId, 'running');
-      interaction.editReply('Server started successfully!');
-    } else {
-      interaction.editReply('Failed to confirm the server has started. Please check its status manually.');
-    }
-  } catch (error) {
-    logger.error('Error starting server:', error.message);
-    interaction.editReply('There was an error starting the server.');
-  }
-}
-
-async function handleStopServer(interaction) {
-  try {
-    await interaction.deferUpdate();
-  } catch (e) {
-    if (e.code === 10062) return;
-    throw e;
-  }
-
-  const instanceId = interaction.values[0];
-
-  try {
-    await interaction.editReply({
-      content: 'Stopping the server. This may take a few minutes...',
-      components: []
-    });
-
-    const success = await stopInstanceApi(instanceId);
-    if (success) {
-      instanceState.updateInstance(instanceId, 'stopped');
-      interaction.editReply('Server stopped successfully!');
-    } else {
-      interaction.editReply('Failed to confirm the server has stopped. Please check its status manually.');
-    }
-  } catch (error) {
-    logger.error('Error stopping server:', error.message);
-    interaction.editReply('There was an error stopping the server.');
   }
 }
 

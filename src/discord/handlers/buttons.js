@@ -9,13 +9,10 @@ import {
   StringSelectMenuBuilder,
   ModalBuilder,
   TextInputBuilder,
-  TextInputStyle,
-  MessageFlags
+  TextInputStyle
 } from 'discord.js';
 import {
   listInstances,
-  getPublicSnapshots,
-  getGroupedRegions,
   rebootInstanceApi
 } from '../../vultr/index.js';
 import { instanceState } from '../../state/instanceState.js';
@@ -32,86 +29,36 @@ export function setPanelExecutors(executors) {
 }
 
 export async function handleButton(interaction) {
-  // Handle modal-triggering buttons
-  if (interaction.customId === 'btn_create_modal' || interaction.customId === 'btn_restore_modal') {
+  // Handle create modal button
+  if (interaction.customId === 'btn_create_modal') {
     try {
-      if (interaction.customId === 'btn_create_modal') {
-        const modal = new ModalBuilder()
-          .setCustomId('create_server_modal')
-          .setTitle('Create New Server');
+      const modal = new ModalBuilder()
+        .setCustomId('create_server_modal')
+        .setTitle('Create New Server');
 
-        const nameInput = new TextInputBuilder()
-          .setCustomId('server_name')
-          .setLabel('Server Name')
-          .setStyle(TextInputStyle.Short)
-          .setPlaceholder(`${interaction.user.username}'s Server`)
-          .setRequired(false)
-          .setMaxLength(50);
+      const nameInput = new TextInputBuilder()
+        .setCustomId('server_name')
+        .setLabel('Server Name')
+        .setStyle(TextInputStyle.Short)
+        .setPlaceholder(`${interaction.user.username}'s Server`)
+        .setRequired(false)
+        .setMaxLength(50);
 
-        const cityInput = new TextInputBuilder()
-          .setCustomId('server_city')
-          .setLabel('City/Region (e.g., dfw, mia, sea)')
-          .setStyle(TextInputStyle.Short)
-          .setPlaceholder('dfw')
-          .setValue('dfw')
-          .setRequired(false)
-          .setMaxLength(10);
+      const cityInput = new TextInputBuilder()
+        .setCustomId('server_city')
+        .setLabel('City/Region (e.g., dfw, mia, sea)')
+        .setStyle(TextInputStyle.Short)
+        .setPlaceholder('dfw')
+        .setValue('dfw')
+        .setRequired(false)
+        .setMaxLength(10);
 
-        const row1 = new ActionRowBuilder().addComponents(nameInput);
-        const row2 = new ActionRowBuilder().addComponents(cityInput);
+      const row1 = new ActionRowBuilder().addComponents(nameInput);
+      const row2 = new ActionRowBuilder().addComponents(cityInput);
 
-        modal.addComponents(row1, row2);
-        await interaction.showModal(modal);
-        return;
-      }
-
-      if (interaction.customId === 'btn_restore_modal') {
-        const publicSnapshots = await getPublicSnapshots();
-
-        if (!publicSnapshots.length) {
-          await interaction.reply({
-            content: 'No snapshots available for restore.',
-            flags: MessageFlags.Ephemeral
-          });
-          return;
-        }
-
-        const modal = new ModalBuilder()
-          .setCustomId('restore_server_modal')
-          .setTitle('Restore Server from Snapshot');
-
-        const snapshotInput = new TextInputBuilder()
-          .setCustomId('snapshot_id')
-          .setLabel('Snapshot ID (or leave empty for latest)')
-          .setStyle(TextInputStyle.Short)
-          .setPlaceholder(publicSnapshots[0].id)
-          .setRequired(false);
-
-        const nameInput = new TextInputBuilder()
-          .setCustomId('server_name')
-          .setLabel('Server Name')
-          .setStyle(TextInputStyle.Short)
-          .setPlaceholder(`${interaction.user.username}'s Restored Server`)
-          .setRequired(false)
-          .setMaxLength(50);
-
-        const cityInput = new TextInputBuilder()
-          .setCustomId('server_city')
-          .setLabel('City/Region (e.g., dfw, mia, sea)')
-          .setStyle(TextInputStyle.Short)
-          .setPlaceholder('dfw')
-          .setValue('dfw')
-          .setRequired(false)
-          .setMaxLength(10);
-
-        const row1 = new ActionRowBuilder().addComponents(snapshotInput);
-        const row2 = new ActionRowBuilder().addComponents(nameInput);
-        const row3 = new ActionRowBuilder().addComponents(cityInput);
-
-        modal.addComponents(row1, row2, row3);
-        await interaction.showModal(modal);
-        return;
-      }
+      modal.addComponents(row1, row2);
+      await interaction.showModal(modal);
+      return;
     } catch (error) {
       if (error.code === 10062) {
         logger.debug('Modal interaction expired');
@@ -151,9 +98,6 @@ export async function handleButton(interaction) {
 
   // Handle panel buttons
   switch (interaction.customId) {
-    case 'btn_start':
-      if (executeFromPanel.start) await executeFromPanel.start(interaction);
-      break;
     case 'btn_destroy':
       if (executeFromPanel.destroy) await executeFromPanel.destroy(interaction);
       break;

@@ -5,28 +5,16 @@
  * Each command file exports a command object with `data` and `execute` properties.
  */
 
-import { listCommand } from './list.js';
-import { statusCommand } from './status.js';
-import { startCommand } from './start.js';
-import { stopCommand } from './stop.js';
 import { createCommand } from './create.js';
-import { snapshotCommand } from './snapshot.js';
-import { restoreCommand } from './restore.js';
-import { restartCommand } from './restart.js';
 import { destroyCommand } from './destroy.js';
+import { snapshotCommand } from './snapshot.js';
 import { panelCommand } from './panel.js';
 
 // All commands in array format for easy iteration
 export const commands = [
-  listCommand,
-  statusCommand,
-  startCommand,
-  stopCommand,
   createCommand,
-  snapshotCommand,
-  restoreCommand,
-  restartCommand,
   destroyCommand,
+  snapshotCommand,
   panelCommand
 ];
 
@@ -42,14 +30,8 @@ export function registerCommands(client) {
 
 // Re-export individual commands for direct access if needed
 export {
-  listCommand,
-  statusCommand,
-  startCommand,
-  stopCommand,
   createCommand,
-  snapshotCommand,
-  restoreCommand,
-  restartCommand,
   destroyCommand,
+  snapshotCommand,
   panelCommand
 };

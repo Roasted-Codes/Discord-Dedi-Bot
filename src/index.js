@@ -15,7 +15,6 @@ import { commands, registerCommands } from './discord/commands/index.js';
 import { setupHandlers, setDestructionPollingFunction, setPanelExecutors, setModalPanelFunction } from './discord/handlers/index.js';
 import { setPollingFunction } from './discord/commands/create.js';
 import { setSnapshotPollingFunction } from './discord/commands/snapshot.js';
-import { setRestorePollingFunction } from './discord/commands/restore.js';
 import { setPanelFunction } from './discord/commands/panel.js';
 import { instanceState } from './state/instanceState.js';
 import { panelData, savePanelData } from './state/panelState.js';
@@ -669,7 +668,6 @@ async function sendWarningDM(tracked, minutesRemaining) {
 
 setPollingFunction(startInstanceStatusPolling);
 setSnapshotPollingFunction(startSnapshotStatusPolling);
-setRestorePollingFunction(startInstanceStatusPolling);
 setPanelFunction(updatePanel);
 setDestructionPollingFunction(startInstanceDestructionPolling);
 setModalPanelFunction(updatePanel);
