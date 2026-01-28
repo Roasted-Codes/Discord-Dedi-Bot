@@ -1,7 +1,7 @@
 # Known Issues & Technical Debt
 
-**Last Updated:** January 27, 2026
-**Status:** 4 of 7 main issues fixed in v2.0 modular refactor. 3 remain open.
+**Last Updated:** January 28, 2026
+**Status:** 4 of 7 main issues fixed. Code cleanup complete (~4,100 lines removed).
 
 ---
 
@@ -18,6 +18,14 @@ Panel updates use `panelUpdateInProgress` flag with `pendingPanelUpdate` queue.
 
 ### ✅ Clean Up Old Destroyed Instances (Partially Fixed Jan 2026)
 **Fix:** Graceful shutdown prevents indefinite accumulation. Full periodic pruning still recommended for long-running instances.
+
+### ✅ Panel-Only UI (Implemented Jan 2026)
+**Fix:** Eliminated ephemeral message clutter. All feedback now via:
+- **Panel**: Live status updates (auto-refreshes every 3 seconds)
+- **DMs**: Permanent records (server ready, destruction cost, timer warnings)
+
+### ✅ Duplicate Slash Commands (Fixed Jan 2026)
+**Fix:** Commands were registered both globally AND to guild, causing duplicates. Now registers globally only and clears guild-specific commands.
 
 ---
 
@@ -109,6 +117,8 @@ Generic error messages could be improved to show specific failure reasons (rate 
 
 | Date | Change |
 |------|--------|
+| Jan 28, 2026 | **Code Cleanup**: Removed old monolithic index.js (~4,100 lines), unused exports, duplicate slash commands fix, redundant List button removed |
+| Jan 28, 2026 | **Panel-Only UI**: Eliminated ephemeral messages, all feedback via panel + DMs |
 | Jan 27, 2026 | **v2.0 Modular Refactor**: Fixed Bug #1 (memory leak), graceful shutdown, instance cleanup. 4 of 7 issues now fixed. |
 | Jan 27, 2026 | Audit review: confirmed Issue #7 fixed, all others remain open |
 | Dec 18, 2025 | Initial code audit completed |
