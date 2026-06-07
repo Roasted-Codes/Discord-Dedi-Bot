@@ -10,11 +10,33 @@ import {
   SELF_DESTRUCT_COIN_MINUTES,
   PANEL_REFRESH_INTERVAL_MS
 } from './config/constants.js';
-import { createDiscordClient, REST, Routes, ActionRowBuilder, ButtonBuilder, ButtonStyle, StringSelectMenuBuilder, AttachmentBuilder } from './discord/client.js';
+import {
+  createDiscordClient,
+  REST,
+  Routes,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  StringSelectMenuBuilder,
+  AttachmentBuilder,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
+  MessageFlags
+} from './discord/client.js';
 import { fileURLToPath } from 'url';
 import path from 'path';
+import { randomUUID } from 'crypto';
 import { commands, registerCommands } from './discord/commands/index.js';
-import { setupHandlers, setDestructionPollingFunction, setPanelExecutors, setModalPanelFunction, setQuickCreateWithTimerFunction, setModalQuickCreateFunction } from './discord/handlers/index.js';
+import {
+  setupHandlers,
+  setDestructionPollingFunction,
+  setPanelExecutors,
+  setModalPanelFunction,
+  setQuickCreateWithTimerFunction,
+  setModalQuickCreateFunction,
+  setModalManualRestoreFunction
+} from './discord/handlers/index.js';
 import { setPollingFunction } from './discord/commands/create.js';
 import { setSnapshotPollingFunction } from './discord/commands/snapshot.js';
 import { setPanelFunction } from './discord/commands/panel.js';
@@ -25,11 +47,32 @@ import {
   listInstances,
   getInstance,
   getGroupedRegions,
-  calculateInstanceCost
+  calculateInstanceCost,
+  isCurrentServer,
+  createInstanceFromSnapshot,
+  getSnapshots,
+  getBotManagedSnapshots,
+  getCleanSnapshotName,
+  hasSnapshotPermission
 } from './vultr/index.js';
 import { sendAutoCleanupFollowUp, sendServerCreationDM, sendServerDestructionDM } from './services/notifications.js';
 import { formatStatus, formatRemainingTime, formatInstanceDetails } from './utils/formatters.js';
 import { logger } from './utils/logger.js';
+import { createServerIdentity, getNextServerSequence } from './identity/serverIdentity.js';
+import { buildVultrUserData } from './identity/cloudInit.js';
+import {
+  DEDI_SNAPSHOT_CHOICES,
+  DEFAULT_DEDI_SNAPSHOT_KEY,
+  getDediSnapshotChoice,
+  getDediSnapshotChoiceById
+} from './config/snapshots.js';
+import {
+  assignXlinkAccount,
+  buildXlinkEnv,
+  releaseXlinkAssignment,
+  syncXlinkAssignmentsWithInstances,
+  updateXlinkAssignmentInstance
+} from './xlink/credentials.js';
 
 // Create Discord client
 const client = createDiscordClient();
@@ -40,6 +83,143 @@ const cleanupFunctions = [];
 // Banner image path
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const bannerPath = path.join(__dirname, '../assets/h2_banner.png');
+
+async function getNextIdentitySequence() {
+  try {
+    const vultrInstances = await listInstances();
+    return getNextServerSequence([
+      ...instanceState.instances,
+      ...vultrInstances.map(instance => ({
+        server_id: instance.label,
+        label: instance.label,
+        name: instance.label
+      }))
+    ]);
+  } catch (error) {
+    logger.debug('Falling back to bot-local server sequence:', error.message);
+    return getNextServerSequence(instanceState.instances);
+  }
+}
+
+async function resolveCityName(regionId) {
+  try {
+    const groupedRegions = await getGroupedRegions();
+    for (const countries of Object.values(groupedRegions)) {
+      for (const cities of Object.values(countries)) {
+        const city = cities.find(candidate => candidate.id === regionId);
+        if (city) {
+          return city.city;
+        }
+      }
+    }
+  } catch (error) {
+    logger.debug('Falling back to region code for city name:', error.message);
+  }
+
+  return String(regionId || '').toUpperCase();
+}
+
+function getSnapshotDisplayName(snapshot) {
+  return getCleanSnapshotName(snapshot) || snapshot.description || snapshot.id;
+}
+
+const RESTORE_SNAPSHOT_PAGE_SIZE = 25;
+const RESTORE_CONFIRM_TTL_MS = 15 * 60 * 1000;
+const pendingManualRestores = new Map();
+
+function truncateDiscordText(value, maxLength) {
+  const text = String(value || '');
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, Math.max(0, maxLength - 1))}…`;
+}
+
+function getSnapshotShortId(snapshotOrId) {
+  const id = typeof snapshotOrId === 'string' ? snapshotOrId : snapshotOrId?.id;
+  return id ? id.slice(-8) : 'unknown';
+}
+
+function formatSnapshotDate(snapshot) {
+  if (!snapshot?.date_created) return 'unknown date';
+  const date = new Date(snapshot.date_created);
+  if (Number.isNaN(date.getTime())) return 'unknown date';
+  return date.toISOString().slice(0, 10);
+}
+
+function formatSnapshotSize(snapshot) {
+  if (typeof snapshot?.size !== 'number' || snapshot.size <= 0) return 'unknown size';
+  const sizeGb = snapshot.size > 1024 ? snapshot.size / (1024 ** 3) : snapshot.size;
+  return `${Math.round(sizeGb)}GB`;
+}
+
+function formatSnapshotOptionDescription(snapshot) {
+  return truncateDiscordText(
+    `${formatSnapshotDate(snapshot)} | ${formatSnapshotSize(snapshot)} | ID ...${getSnapshotShortId(snapshot)}`,
+    100
+  );
+}
+
+function buildRestoreSnapshotPickerPayload(snapshots, requestedPage = 0) {
+  const pageCount = Math.max(1, Math.ceil(snapshots.length / RESTORE_SNAPSHOT_PAGE_SIZE));
+  const page = Math.min(Math.max(requestedPage, 0), pageCount - 1);
+  const pageSnapshots = snapshots.slice(
+    page * RESTORE_SNAPSHOT_PAGE_SIZE,
+    (page + 1) * RESTORE_SNAPSHOT_PAGE_SIZE
+  );
+
+  const components = [];
+  if (pageSnapshots.length) {
+    components.push(new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder()
+        .setCustomId('restore_snapshot_select')
+        .setPlaceholder('Choose a snapshot to restore')
+        .addOptions(pageSnapshots.map(snapshot => ({
+          label: truncateDiscordText(getSnapshotDisplayName(snapshot), 100),
+          description: formatSnapshotOptionDescription(snapshot),
+          value: snapshot.id
+        })))
+    ));
+  }
+
+  const navRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`restore_snapshot_page_${page - 1}`)
+      .setLabel('Previous')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(page <= 0),
+    new ButtonBuilder()
+      .setCustomId(`restore_snapshot_page_${page + 1}`)
+      .setLabel('Next')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(page >= pageCount - 1 || snapshots.length === 0),
+    new ButtonBuilder()
+      .setCustomId(`restore_snapshot_refresh_${page}`)
+      .setLabel('Refresh')
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId('restore_snapshot_advanced')
+      .setLabel('Advanced: ID')
+      .setStyle(ButtonStyle.Secondary)
+  );
+  components.push(navRow);
+
+  const content = snapshots.length
+    ? `**Restore Snapshot**\n\nChoose a bot-managed snapshot. Showing ${page + 1}/${pageCount}.`
+    : '**Restore Snapshot**\n\nNo bot-managed snapshots were found. Use Advanced only if you have a raw Vultr snapshot ID.';
+
+  return { content, components };
+}
+
+function storePendingManualRestore(payload) {
+  const token = randomUUID();
+  pendingManualRestores.set(token, {
+    ...payload,
+    createdAt: Date.now(),
+    expiresAt: Date.now() + RESTORE_CONFIRM_TTL_MS
+  });
+
+  setTimeout(() => pendingManualRestores.delete(token), RESTORE_CONFIRM_TTL_MS);
+  return token;
+}
 
 // ============================================================================
 // POLLING FUNCTIONS
@@ -111,11 +291,16 @@ async function startInstanceStatusPolling(instanceId, serverName, region, intera
 
         if (sendDM) {
           try {
+            const trackedInstance = instanceState.getInstance(instanceId);
             await sendServerCreationDM(interaction.user, {
               serverName,
               region,
               ip: instance.main_ip,
-              elapsedMinutes
+              elapsedMinutes,
+              serverId: trackedInstance?.serverId,
+              hostname: trackedInstance?.hostname,
+              friendlyHostname: trackedInstance?.friendlyHostname,
+              snapshotLabel: trackedInstance?.snapshotLabel
             });
           } catch (e) {
             logger.debug('Failed to send creation DM:', e.message);
@@ -223,6 +408,7 @@ async function startInstanceDestructionPolling(instanceId, serverName, cost, int
 
       if (!instance) {
         instanceState.updateInstance(instanceId, 'destroyed', { selfDestructTimer: null });
+        await releaseXlinkAssignment({ vultrInstanceId: instanceId });
         try {
           await sendServerDestructionDM(interaction.user, serverName, cost);
         } catch (e) {
@@ -244,6 +430,7 @@ async function startInstanceDestructionPolling(instanceId, serverName, cost, int
     } catch (error) {
       if (error.response?.status === 404 || error.response?.status === 403) {
         instanceState.updateInstance(instanceId, 'destroyed', { selfDestructTimer: null });
+        await releaseXlinkAssignment({ vultrInstanceId: instanceId });
         try {
           await sendServerDestructionDM(interaction.user, serverName, cost);
         } catch (e) {
@@ -294,7 +481,11 @@ async function generatePanelComponents(showQuickActions = true) {
         .setCustomId('btn_insert_coin')
         .setLabel('Insert Coin')
         .setStyle(ButtonStyle.Success)
-        .setDisabled(stats.total === 0)
+        .setDisabled(stats.total === 0),
+      new ButtonBuilder()
+        .setCustomId('btn_restore_snapshot')
+        .setLabel('Restore Snapshot')
+        .setStyle(ButtonStyle.Secondary)
     );
 
   const rows = [row1];
@@ -322,7 +513,7 @@ async function generatePanelComponents(showQuickActions = true) {
         new ButtonBuilder()
           .setCustomId(`btn_quick_${city.id}`)
           .setLabel(city.name)
-          .setStyle(ButtonStyle.Secondary)
+          .setStyle(ButtonStyle.Primary)
       );
     });
 
@@ -331,7 +522,7 @@ async function generatePanelComponents(showQuickActions = true) {
         new ButtonBuilder()
           .setCustomId(`btn_quick_${city.id}`)
           .setLabel(city.name)
-          .setStyle(ButtonStyle.Secondary)
+          .setStyle(ButtonStyle.Primary)
       );
     });
 
@@ -367,6 +558,12 @@ async function formatServersForPanel(guild) {
       if (tracked?.selfDestructTimer) {
         const timeStr = formatRemainingTime(tracked.selfDestructTimer.expiresAt);
         content += `> Timer: ${timeStr}\n`;
+      }
+
+      const snapshotLabel = tracked?.snapshotLabel ||
+        getDediSnapshotChoiceById(instance.snapshot_id)?.label;
+      if (snapshotLabel) {
+        content += `> Snapshot: ${snapshotLabel}\n`;
       }
 
       if (tracked?.creator?.id && tracked.creator.id !== 'unknown') {
@@ -538,6 +735,224 @@ async function executeRestartFromPanel(interaction) {
   });
 }
 
+async function executeManualRestoreFromPanel(interaction) {
+  if (!hasSnapshotPermission(interaction.user.id)) {
+    return interaction.reply({
+      content: 'You do not have permission to restore snapshots.',
+      flags: MessageFlags.Ephemeral
+    });
+  }
+
+  const snapshots = await getBotManagedSnapshots();
+  return interaction.reply({
+    ...buildRestoreSnapshotPickerPayload(snapshots, 0),
+    flags: MessageFlags.Ephemeral
+  });
+}
+
+async function executeRestoreSnapshotPage(interaction, page = 0) {
+  if (!hasSnapshotPermission(interaction.user.id)) {
+    return interaction.reply({
+      content: 'You do not have permission to restore snapshots.',
+      flags: MessageFlags.Ephemeral
+    });
+  }
+
+  try {
+    await interaction.deferUpdate();
+  } catch (error) {
+    if (error.code === 10062) return;
+    throw error;
+  }
+
+  const snapshots = await getBotManagedSnapshots();
+  await interaction.editReply(buildRestoreSnapshotPickerPayload(snapshots, page));
+}
+
+async function executeAdvancedManualRestore(interaction) {
+  if (!hasSnapshotPermission(interaction.user.id)) {
+    return interaction.reply({
+      content: 'You do not have permission to manually restore snapshots.',
+      flags: MessageFlags.Ephemeral
+    });
+  }
+
+  const modal = new ModalBuilder()
+    .setCustomId('manual_restore_snapshot_modal')
+    .setTitle('Advanced Snapshot Restore');
+
+  const snapshotInput = new TextInputBuilder()
+    .setCustomId('snapshot_id')
+    .setLabel('Snapshot ID')
+    .setStyle(TextInputStyle.Short)
+    .setPlaceholder('xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx')
+    .setRequired(true)
+    .setMaxLength(36);
+
+  const nameInput = new TextInputBuilder()
+    .setCustomId('server_name')
+    .setLabel('Server Name (optional)')
+    .setStyle(TextInputStyle.Short)
+    .setPlaceholder('Leave blank for generated name')
+    .setRequired(false)
+    .setMaxLength(50);
+
+  const cityInput = new TextInputBuilder()
+    .setCustomId('server_city')
+    .setLabel('City/Region')
+    .setStyle(TextInputStyle.Short)
+    .setPlaceholder('dfw')
+    .setRequired(true)
+    .setMaxLength(10);
+
+  const timerInput = new TextInputBuilder()
+    .setCustomId('timer_minutes')
+    .setLabel('Timer minutes (0 = no timer)')
+    .setStyle(TextInputStyle.Short)
+    .setPlaceholder('210')
+    .setRequired(true)
+    .setMaxLength(4);
+
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(snapshotInput),
+    new ActionRowBuilder().addComponents(nameInput),
+    new ActionRowBuilder().addComponents(cityInput),
+    new ActionRowBuilder().addComponents(timerInput)
+  );
+
+  await interaction.showModal(modal);
+}
+
+async function executeManualRestoreConfirmation(interaction, {
+  snapshotId,
+  requestedName,
+  regionId,
+  timerMinutes,
+  allowUnmanaged = false
+}) {
+  if (!hasSnapshotPermission(interaction.user.id)) {
+    return interaction.editReply('You do not have permission to restore snapshots.');
+  }
+
+  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (!uuidRegex.test(snapshotId)) {
+    return interaction.editReply('Invalid snapshot ID format.');
+  }
+
+  const snapshots = allowUnmanaged ? await getSnapshots() : await getBotManagedSnapshots();
+  const snapshot = snapshots.find(candidate => candidate.id === snapshotId);
+  if (!snapshot) {
+    return interaction.editReply(allowUnmanaged
+      ? `Snapshot \`${snapshotId}\` was not found in this Vultr account.`
+      : 'That snapshot is not available in the normal restore picker. Use Refresh or Advanced if needed.');
+  }
+  if (snapshot.status !== 'complete') {
+    return interaction.editReply(`Snapshot "${getSnapshotDisplayName(snapshot)}" is not complete yet. Current status: ${snapshot.status || 'unknown'}.`);
+  }
+
+  const cityName = await resolveCityName(regionId);
+  const identity = createServerIdentity({
+    gamertag: requestedName || undefined,
+    sequence: await getNextIdentitySequence(),
+    region: regionId,
+    creator: interaction.user.username,
+    domain: process.env.REALONES_DOMAIN || 'realones.gg'
+  });
+  const snapshotLabel = getSnapshotDisplayName(snapshot);
+  const token = storePendingManualRestore({
+    userId: interaction.user.id,
+    snapshotId,
+    requestedName,
+    regionId,
+    timerMinutes,
+    cityName,
+    identity,
+    snapshotLabel
+  });
+
+  const confirmRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`restore_snapshot_confirm_${token}`)
+      .setLabel('Restore')
+      .setStyle(ButtonStyle.Danger),
+    new ButtonBuilder()
+      .setCustomId(`restore_snapshot_cancel_${token}`)
+      .setLabel('Cancel')
+      .setStyle(ButtonStyle.Secondary)
+  );
+
+  return interaction.editReply({
+    content:
+      `**Confirm Snapshot Restore**\n\n` +
+      `Snapshot: **${snapshotLabel}**\n` +
+      `Created: ${formatSnapshotDate(snapshot)}\n` +
+      `Snapshot ID: \`${snapshot.id}\` (...${getSnapshotShortId(snapshot)})\n` +
+      `Region: ${cityName} (${regionId.toUpperCase()})\n` +
+      `Server name: ${identity.display_name}\n` +
+      `Timer: ${timerMinutes === 0 ? 'none' : `${timerMinutes} minutes`}\n` +
+      `Plan: \`${config.vultr.plan}\`\n\n` +
+      `Click Restore to create the server from this snapshot.`,
+    components: [confirmRow]
+  });
+}
+
+async function executeConfirmManualRestore(interaction, token) {
+  const pending = pendingManualRestores.get(token);
+
+  try {
+    await interaction.deferUpdate();
+  } catch (error) {
+    if (error.code === 10062) return;
+    throw error;
+  }
+
+  if (!pending) {
+    return interaction.editReply({
+      content: 'This restore confirmation expired. Start restore again.',
+      components: []
+    });
+  }
+
+  if (pending.userId !== interaction.user.id) {
+    return interaction.editReply({
+      content: 'Only the user who prepared this restore can confirm it.',
+      components: []
+    });
+  }
+
+  if (Date.now() > pending.expiresAt) {
+    pendingManualRestores.delete(token);
+    return interaction.editReply({
+      content: 'This restore confirmation expired. Start restore again.',
+      components: []
+    });
+  }
+
+  pendingManualRestores.delete(token);
+  await interaction.editReply({
+    content: `Restoring **${pending.identity.display_name}** from **${pending.snapshotLabel}**...`,
+    components: []
+  });
+
+  await executeManualRestoreFromSnapshot(interaction, pending);
+}
+
+async function executeCancelManualRestore(interaction, token) {
+  pendingManualRestores.delete(token);
+
+  try {
+    await interaction.deferUpdate();
+  } catch (error) {
+    if (error.code === 10062) return;
+    throw error;
+  }
+
+  await interaction.editReply({
+    content: 'Snapshot restore cancelled.',
+    components: []
+  });
+}
+
 async function executeQuickCreate(interaction, regionId) {
   const groupedRegions = await getGroupedRegions();
   let cityName = regionId.toUpperCase();
@@ -553,11 +968,11 @@ async function executeQuickCreate(interaction, regionId) {
     if (cityName !== regionId.toUpperCase()) break;
   }
 
-  // Show timer selection dropdown
-  const timerOptions = [
-    { label: '3.5 hours (Recommended)', value: `${regionId}_210` },
-    { label: 'Custom time...', value: `${regionId}_custom` }
-  ];
+  // Show snapshot and timer selection dropdown.
+  const timerOptions = DEDI_SNAPSHOT_CHOICES.flatMap(snapshot => [
+    { label: `${snapshot.label} - 3.5 hours`, value: `${regionId}|${snapshot.key}|210` },
+    { label: `${snapshot.label} - Custom time...`, value: `${regionId}|${snapshot.key}|custom` }
+  ]);
 
   const row = new ActionRowBuilder()
     .addComponents(
@@ -568,12 +983,134 @@ async function executeQuickCreate(interaction, regionId) {
     );
 
   return sendAutoCleanupFollowUp(interaction, {
-    content: `**Create Server in ${cityName}**\n\nHow long should this server run before auto-destruct?`,
+    content: `**Create Server in ${cityName}**\n\nSelect a snapshot and server lifetime:`,
     components: [row]
   });
 }
 
-async function executeQuickCreateWithTimer(interaction, regionId, timerMinutes) {
+async function executeManualRestoreFromSnapshot(interaction, {
+  snapshotId,
+  requestedName,
+  regionId,
+  timerMinutes,
+  identity: preparedIdentity = null,
+  cityName: preparedCityName = null,
+  snapshotLabel: preparedSnapshotLabel = null
+}) {
+  let identity = preparedIdentity;
+  let xlink = null;
+
+  try {
+    if (!hasSnapshotPermission(interaction.user.id)) {
+      return interaction.editReply('You do not have permission to manually restore snapshots.');
+    }
+
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!uuidRegex.test(snapshotId)) {
+      return interaction.editReply('Invalid snapshot ID format.');
+    }
+
+    const snapshots = await getSnapshots();
+    const snapshot = snapshots.find(candidate => candidate.id === snapshotId);
+    if (!snapshot) {
+      return interaction.editReply(`Snapshot \`${snapshotId}\` was not found in this Vultr account.`);
+    }
+    if (snapshot.status !== 'complete') {
+      return interaction.editReply(`Snapshot "${getSnapshotDisplayName(snapshot)}" is not complete yet. Current status: ${snapshot.status || 'unknown'}.`);
+    }
+
+    const cityName = preparedCityName || await resolveCityName(regionId);
+    const snapshotLabel = preparedSnapshotLabel || getSnapshotDisplayName(snapshot);
+
+    if (!identity) {
+      identity = createServerIdentity({
+        gamertag: requestedName || undefined,
+        sequence: await getNextIdentitySequence(),
+        region: regionId,
+        creator: interaction.user.username,
+        domain: process.env.REALONES_DOMAIN || 'realones.gg'
+      });
+    }
+    const serverName = identity.display_name;
+
+    xlink = await assignXlinkAccount({
+      serverId: identity.server_id,
+      region: regionId,
+      cityLabel: cityName,
+      creator: interaction.user.username
+    });
+    const xlinkEnv = buildXlinkEnv({
+      credentials: xlink.credentials,
+      cityLabel: cityName
+    });
+
+    const instance = await createInstanceFromSnapshot(
+      snapshot.id,
+      identity.server_id,
+      regionId,
+      { userData: buildVultrUserData(identity, { extraEnv: xlinkEnv }) }
+    );
+
+    if (!instance?.id) {
+      await releaseXlinkAssignment({ serverId: identity.server_id });
+      return interaction.editReply('Failed to restore snapshot. Please try again later.');
+    }
+
+    try {
+      await updateXlinkAssignmentInstance(identity.server_id, instance.id);
+    } catch (error) {
+      logger.warn('XLink assignment instance update failed:', error.message);
+    }
+
+    instanceState.trackInstance(
+      instance.id,
+      interaction.user.id,
+      interaction.user.username,
+      'creating',
+      {
+        name: serverName,
+        region: regionId,
+        timerMinutes,
+        serverId: identity.server_id,
+        displayName: identity.display_name,
+        hostname: identity.hostname,
+        friendlyHostname: identity.friendly_hostname,
+        realonesSequence: identity.env.REALONES_SERVER_SEQUENCE,
+        snapshotKey: 'manual',
+        snapshotId: snapshot.id,
+        snapshotLabel,
+        xlinkXtag: xlink.assignment.xtag,
+        xlinkCityLabel: cityName
+      }
+    );
+
+    await interaction.editReply(
+      `Restoring "${serverName}" in ${cityName} (${regionId.toUpperCase()}).\n` +
+      `Server ID: \`${identity.server_id}\`\n` +
+      `Snapshot: \`${snapshotLabel}\`\n` +
+      `Snapshot ID: \`${snapshot.id}\`\n` +
+      `XLink Xtag: \`${xlink.assignment.xtag}\`\n` +
+      `Timer: ${timerMinutes === 0 ? 'none' : `${timerMinutes} minutes`}\n` +
+      `XLink auto-login: configured`
+    );
+
+    startInstanceStatusPolling(instance.id, serverName, regionId, interaction, null, true);
+    setTimeout(() => updatePanel(), 5000);
+  } catch (error) {
+    if (identity && xlink) {
+      await releaseXlinkAssignment({ serverId: identity.server_id });
+    }
+    logger.error('Manual snapshot restore failed:', error.message);
+    await interaction.editReply(`Manual restore failed: ${error.message}`);
+  }
+}
+
+async function executeQuickCreateWithTimer(
+  interaction,
+  regionId,
+  timerMinutes,
+  snapshotKey = DEFAULT_DEDI_SNAPSHOT_KEY
+) {
   const groupedRegions = await getGroupedRegions();
   let cityName = regionId.toUpperCase();
 
@@ -588,39 +1125,86 @@ async function executeQuickCreateWithTimer(interaction, regionId, timerMinutes) 
     if (cityName !== regionId.toUpperCase()) break;
   }
 
-  const serverName = `${interaction.user.username}'s ${cityName} Server`;
+  let identity = null;
+  let xlink = null;
 
   try {
     const { createInstanceFromSnapshot } = await import('./vultr/index.js');
+    const snapshotChoice = getDediSnapshotChoice(snapshotKey);
+    identity = createServerIdentity({
+      sequence: await getNextIdentitySequence(),
+      region: regionId,
+      creator: interaction.user.username,
+      domain: process.env.REALONES_DOMAIN || 'realones.gg'
+    });
+    const serverName = identity.display_name;
 
-    let snapshotId = config.vultr.snapshotId;
-    if (!snapshotId) {
-      const { getSnapshots } = await import('./vultr/index.js');
-      const snapshots = await getSnapshots();
-      snapshotId = snapshots[0]?.id;
-    }
+    xlink = await assignXlinkAccount({
+      serverId: identity.server_id,
+      region: regionId,
+      cityLabel: cityName,
+      creator: interaction.user.username
+    });
+    const xlinkEnv = buildXlinkEnv({
+      credentials: xlink.credentials,
+      cityLabel: cityName
+    });
 
-    if (!snapshotId) {
-      return sendAutoCleanupFollowUp(interaction, 'No snapshots available.');
-    }
-
-    const instance = await createInstanceFromSnapshot(snapshotId, serverName, regionId);
+    const instance = await createInstanceFromSnapshot(
+      snapshotChoice.id,
+      identity.server_id,
+      regionId,
+      { userData: buildVultrUserData(identity, { extraEnv: xlinkEnv }) }
+    );
 
     if (instance?.id) {
+      try {
+        await updateXlinkAssignmentInstance(identity.server_id, instance.id);
+      } catch (error) {
+        logger.warn('XLink assignment instance update failed:', error.message);
+      }
       instanceState.trackInstance(
         instance.id,
         interaction.user.id,
         interaction.user.username,
         'creating',
-        { name: serverName, region: regionId, timerMinutes }
+        {
+          name: serverName,
+          region: regionId,
+          timerMinutes,
+          serverId: identity.server_id,
+          displayName: identity.display_name,
+          hostname: identity.hostname,
+          friendlyHostname: identity.friendly_hostname,
+          realonesSequence: identity.env.REALONES_SERVER_SEQUENCE,
+          snapshotKey: snapshotChoice.key,
+          snapshotId: snapshotChoice.id,
+          snapshotLabel: snapshotChoice.label,
+          xlinkXtag: xlink.assignment.xtag,
+          xlinkCityLabel: cityName
+        }
       );
 
+      await sendAutoCleanupFollowUp(interaction,
+        `Creating "${serverName}" in ${cityName} (${regionId.toUpperCase()}).\n` +
+        `Server ID: \`${identity.server_id}\`\n` +
+        `Snapshot: \`${snapshotChoice.label}\`\n` +
+        `XLink Xtag: \`${xlink.assignment.xtag}\`\n` +
+        `XLink auto-login: configured`
+      );
       startInstanceStatusPolling(instance.id, serverName, regionId, interaction, null, true);
       setTimeout(() => updatePanel(), 5000);
     } else {
+      await releaseXlinkAssignment({ serverId: identity.server_id });
       await sendAutoCleanupFollowUp(interaction, 'Failed to create server.');
     }
   } catch (error) {
+    if (identity && xlink) {
+      await releaseXlinkAssignment({ serverId: identity.server_id });
+    }
+    if (error.message !== 'No snapshots available.') {
+      logger.debug('Quick create error cleanup path:', error.message);
+    }
     logger.error('Quick create failed:', error.message);
     await sendAutoCleanupFollowUp(interaction, `Error: ${error.message}`);
   }
@@ -650,6 +1234,10 @@ function startSelfDestructPolling() {
           try {
             await vultr.instances.deleteInstance({ "instance-id": tracked.id });
             instanceState.updateInstance(tracked.id, 'destroyed', { selfDestructTimer: null });
+            await releaseXlinkAssignment({
+              vultrInstanceId: tracked.id,
+              serverId: tracked.serverId
+            });
 
             try {
               const user = await client.users.fetch(tracked.creator.id);
@@ -733,9 +1321,15 @@ setDestructionPollingFunction(startInstanceDestructionPolling);
 setModalPanelFunction(updatePanel);
 setQuickCreateWithTimerFunction(executeQuickCreateWithTimer);
 setModalQuickCreateFunction(executeQuickCreateWithTimer);
+setModalManualRestoreFunction(executeManualRestoreConfirmation);
 setPanelExecutors({
   destroy: executeDestroyFromPanel,
   restart: executeRestartFromPanel,
+  manualRestore: executeManualRestoreFromPanel,
+  restoreSnapshotPage: executeRestoreSnapshotPage,
+  advancedManualRestore: executeAdvancedManualRestore,
+  confirmManualRestore: executeConfirmManualRestore,
+  cancelManualRestore: executeCancelManualRestore,
   quickCreate: executeQuickCreate,
   quickCreateWithTimer: executeQuickCreateWithTimer
 });
@@ -751,11 +1345,14 @@ client.once('ready', async () => {
   try {
     const testResponse = await vultr.instances.listInstances();
     logger.info('Vultr API connected');
+    await syncXlinkAssignmentsWithInstances(testResponse.instances || []);
 
     // Recover existing instances
     if (testResponse.instances) {
+      let recoveredCount = 0;
       for (const instance of testResponse.instances) {
-        if (instance.id === config.exclude.instanceId) continue;
+        if (await isCurrentServer(instance.id)) continue;
+        const snapshotChoice = getDediSnapshotChoiceById(instance.snapshot_id);
 
         instanceState.trackInstance(
           instance.id,
@@ -765,12 +1362,16 @@ client.once('ready', async () => {
           {
             ip: instance.main_ip,
             name: instance.label || 'Recovered Server',
-            region: instance.region
+            region: instance.region,
+            snapshotKey: snapshotChoice?.key,
+            snapshotId: snapshotChoice?.id,
+            snapshotLabel: snapshotChoice?.label
           }
         );
+        recoveredCount++;
       }
-      if (testResponse.instances.length > 0) {
-        logger.info(`Recovered ${testResponse.instances.length} instance(s)`);
+      if (recoveredCount > 0) {
+        logger.info(`Recovered ${recoveredCount} instance(s)`);
       }
     }
   } catch (error) {

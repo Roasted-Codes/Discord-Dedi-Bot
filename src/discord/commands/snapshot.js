@@ -1,11 +1,11 @@
 /**
  * /snapshot Command
  *
- * Create a snapshot of a running server (Admin only).
+ * Create a snapshot of any server (Admin only).
  */
 
 import { SlashCommandBuilder } from 'discord.js';
-import { getInstance, hasSnapshotPermission, createSnapshotFromInstance } from '../../vultr/index.js';
+import { getAnyInstance, hasSnapshotPermission, createSnapshotFromInstance } from '../../vultr/index.js';
 import { logger } from '../../utils/logger.js';
 
 // This will be set by the main entry point
@@ -18,7 +18,7 @@ export function setSnapshotPollingFunction(fn) {
 export const snapshotCommand = {
   data: new SlashCommandBuilder()
     .setName('snapshot')
-    .setDescription('Create a snapshot of a running server (Admin only)')
+    .setDescription('Create a snapshot of any server (Admin only)')
     .addStringOption(option =>
       option
         .setName('server')
@@ -59,18 +59,15 @@ export const snapshotCommand = {
         ? `${prefix} ${snapshotName} | ${userDescription}`
         : `${prefix} ${snapshotName}`;
 
-      const instance = await getInstance(serverId);
+      const instance = await getAnyInstance(serverId);
       if (!instance) {
-        return interaction.editReply('Server not found or not available for management.');
-      }
-
-      if (instance.power_status !== 'running') {
-        return interaction.editReply(`Server must be running to create a snapshot. Current status: ${instance.power_status}`);
+        return interaction.editReply('Server not found.');
       }
 
       await interaction.editReply(
         `**Snapshot Creation**\n\n` +
         `Server: ${instance.label || 'Unnamed Server'}\n` +
+        `Current Power: ${instance.power_status || 'unknown'}\n` +
         `Snapshot Name: ${snapshotName}\n` +
         `${isPublic ? 'Visibility: Public' : 'Visibility: Private'}\n` +
         `Cost: ~$0.05/GB/month\n` +
@@ -87,6 +84,7 @@ export const snapshotCommand = {
       await interaction.editReply(
         `Snapshot "${snapshotName}" creation started!\n` +
         `From Server: ${instance.label || 'Unnamed Server'}\n` +
+        `Power state at request: ${instance.power_status || 'unknown'}\n` +
         `Please be patient - snapshot creation typically takes 5-15 minutes.\n` +
         `${isPublic ? 'Will be available to all users when complete' : 'Private snapshot for admin use'}`
       );
@@ -97,7 +95,7 @@ export const snapshotCommand = {
 
     } catch (error) {
       logger.error('Snapshot command failed:', error.message);
-      return interaction.editReply('There was an error creating the snapshot.');
+      return interaction.editReply(`There was an error creating the snapshot: ${error.message}`);
     }
   }
 };

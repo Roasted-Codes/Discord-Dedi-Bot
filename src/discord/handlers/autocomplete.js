@@ -4,7 +4,7 @@
  * Handles autocomplete interactions for city and server selection.
  */
 
-import { getGroupedRegions, listInstances } from '../../vultr/index.js';
+import { getGroupedRegions, listAllInstances, hasSnapshotPermission } from '../../vultr/index.js';
 import { logger } from '../../utils/logger.js';
 
 export async function handleAutocomplete(interaction) {
@@ -34,20 +34,21 @@ export async function handleAutocomplete(interaction) {
 
     // Server autocomplete for /snapshot
     if (interaction.commandName === 'snapshot' && focusedOption.name === 'server') {
-      const focusedValue = focusedOption.value;
-      const runningInstances = await listInstances();
-      const runningServers = runningInstances.filter(instance =>
-        instance.power_status === 'running'
-      );
+      if (!hasSnapshotPermission(interaction.user.id)) {
+        return await interaction.respond([]);
+      }
 
-      const servers = runningServers
+      const focusedValue = focusedOption.value;
+      const allInstances = await listAllInstances();
+
+      const servers = allInstances
         .filter(instance => {
           const label = instance.label || 'Unnamed Server';
           return label.toLowerCase().includes(focusedValue.toLowerCase()) ||
                  instance.id.toLowerCase().includes(focusedValue.toLowerCase());
         })
         .map(instance => ({
-          name: `${instance.label || 'Unnamed Server'} (${instance.region})`,
+          name: `${instance.label || 'Unnamed Server'} (${instance.region}, ${instance.power_status || 'unknown'})`,
           value: instance.id
         }))
         .slice(0, 25);

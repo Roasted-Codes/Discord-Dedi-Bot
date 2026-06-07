@@ -58,11 +58,18 @@ export async function sendAutoCleanupFollowUp(
  */
 export async function sendServerCreationDM(user, details) {
   try {
-    const { serverName, region, ip, elapsedMinutes } = details;
+    const { serverName, serverId, hostname, friendlyHostname, snapshotLabel, region, ip, elapsedMinutes } = details;
+    const identityLines = [
+      serverId ? `> Server ID: \`${serverId}\`` : null,
+      hostname ? `> Hostname: \`${hostname}\`` : null,
+      friendlyHostname ? `> Friendly Name: \`${friendlyHostname}\`` : null,
+      snapshotLabel ? `> Snapshot: \`${snapshotLabel}\`` : null
+    ].filter(Boolean).join('\n');
 
     const message =
       `**Your Server is Ready!**\n\n` +
       `Server "${serverName}" is now running in ${region.toUpperCase()}!\n\n` +
+      (identityLines ? `**Identity:**\n${identityLines}\n\n` : '') +
       `**Connection Details:**\n` +
       `> Linux Remote Desktop: https://${ip}:8080\n` +
       `> Xlink Kai: http://${ip}:34522\n` +

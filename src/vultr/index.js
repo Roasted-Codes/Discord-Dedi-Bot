@@ -7,16 +7,36 @@
 
 import { vultr, fetch } from './client.js';
 import { config } from '../config/index.js';
+import { DEDI_SNAPSHOT_CHOICES } from '../config/snapshots.js';
 import { instanceState } from '../state/instanceState.js';
 import { logger } from '../utils/logger.js';
 
 // Cache the current server ID to avoid repeated metadata calls
 let currentServerInstanceId = null;
+const configuredSnapshotIds = new Set(DEDI_SNAPSHOT_CHOICES.map(snapshot => snapshot.id));
 
 /**
  * Auto-detect the current server instance to prevent self-destruction
  */
 export async function getCurrentServerInstanceId() {
+  try {
+    const response = await fetch('http://169.254.169.254/v1.json', {
+      signal: AbortSignal.timeout(2000)
+    });
+
+    if (response.ok) {
+      const metadata = await response.json();
+      const instanceId = metadata['instance-v2-id'] || metadata.instanceid;
+      if (!instanceId) {
+        throw new Error('Metadata response did not include an instance ID');
+      }
+      logger.info(`Self-protection enabled for instance ${instanceId.trim().slice(0, 8)}...`);
+      return instanceId.trim();
+    }
+  } catch (error) {
+    logger.debug('Vultr v1.json metadata unavailable:', error.message);
+  }
+
   try {
     const response = await fetch('http://169.254.169.254/v1/instanceid', {
       signal: AbortSignal.timeout(2000)
@@ -24,7 +44,7 @@ export async function getCurrentServerInstanceId() {
 
     if (response.ok) {
       const instanceId = await response.text();
-      logger.info(`Self-protection enabled for instance ${instanceId.trim().slice(0, 8)}...`);
+      logger.info(`Self-protection enabled for legacy instance ${instanceId.trim().slice(0, 8)}...`);
       return instanceId.trim();
     }
   } catch (error) {
@@ -82,6 +102,22 @@ export async function getInstance(instanceId) {
 }
 
 /**
+ * Get information about any instance, including bot/excluded instances.
+ * Intended for admin-only maintenance actions such as snapshots.
+ */
+export async function getAnyInstance(instanceId) {
+  try {
+    const response = await vultr.instances.getInstance({
+      "instance-id": instanceId
+    });
+    return response.instance;
+  } catch (error) {
+    logger.error('Error getting instance:', error.message);
+    throw error;
+  }
+}
+
+/**
  * List all instances (excluding the current server and EXCLUDE_SNAPSHOT_ID)
  */
 export async function listInstances() {
@@ -106,6 +142,20 @@ export async function listInstances() {
     return instances;
   } catch (error) {
     logger.error('Error listing instances:', error.message);
+    throw error;
+  }
+}
+
+/**
+ * List every Vultr instance without bot/exclusion filtering.
+ * Intended for admin-only maintenance actions such as snapshots.
+ */
+export async function listAllInstances() {
+  try {
+    const response = await vultr.instances.listInstances();
+    return response.instances || [];
+  } catch (error) {
+    logger.error('Error listing all instances:', error.message);
     throw error;
   }
 }
@@ -184,6 +234,31 @@ export async function getSnapshots() {
     logger.error('Error getting snapshots:', error.message);
     throw error;
   }
+}
+
+/**
+ * Snapshot picker visibility for bot-managed restores.
+ * Includes snapshots created by the bot's /snapshot command, configured dedi
+ * snapshots, and RealOnesV2-named snapshots from prior bot workflows.
+ */
+export function isBotManagedSnapshot(snapshot) {
+  if (!snapshot || snapshot.status !== 'complete') return false;
+
+  const description = snapshot.description || '';
+  const cleanName = getCleanSnapshotName(snapshot).toLowerCase();
+
+  return /^\[(PUBLIC|PRIVATE)\]\s*/i.test(description) ||
+    description.toLowerCase().includes('#public') ||
+    configuredSnapshotIds.has(snapshot.id) ||
+    cleanName.includes('realonesv2');
+}
+
+/**
+ * Get completed snapshots safe to show in the normal restore picker.
+ */
+export async function getBotManagedSnapshots() {
+  const snapshots = await getSnapshots();
+  return snapshots.filter(isBotManagedSnapshot);
 }
 
 /**
@@ -281,7 +356,7 @@ export async function getGroupedRegions() {
 /**
  * Create a new instance from a snapshot with specified region
  */
-export async function createInstanceFromSnapshot(snapshotId, label, region) {
+export async function createInstanceFromSnapshot(snapshotId, label, region, options = {}) {
   const firewallGroupId = config.vultr.firewallGroupId;
   if (!firewallGroupId) {
     throw new Error('VULTR_FIREWALL_GROUP_ID is required but not set.');
@@ -303,12 +378,18 @@ export async function createInstanceFromSnapshot(snapshotId, label, region) {
   }
 
   // Create instance
-  const response = await vultr.instances.createInstance({
+  const createPayload = {
     "snapshot_id": snapshotId,
     "label": label,
     "region": region || config.vultr.region,
     "plan": config.vultr.plan
-  });
+  };
+
+  if (options.userData) {
+    createPayload.user_data = options.userData;
+  }
+
+  const response = await vultr.instances.createInstance(createPayload);
 
   if (!response?.instance?.id) {
     throw new Error('Failed to create instance - invalid API response');

@@ -69,6 +69,64 @@ export async function handleButton(interaction) {
     }
   }
 
+  if (interaction.customId === 'btn_restore_snapshot') {
+    if (executeFromPanel.manualRestore) {
+      await executeFromPanel.manualRestore(interaction);
+    } else {
+      await interaction.reply({ content: 'Manual restore is not available.', ephemeral: true });
+    }
+    return;
+  }
+
+  if (interaction.customId.startsWith('restore_snapshot_page_')) {
+    const page = parseInt(interaction.customId.replace('restore_snapshot_page_', ''), 10);
+    if (executeFromPanel.restoreSnapshotPage) {
+      await executeFromPanel.restoreSnapshotPage(interaction, Number.isNaN(page) ? 0 : page);
+    } else {
+      await interaction.reply({ content: 'Restore snapshot picker is not available.', ephemeral: true });
+    }
+    return;
+  }
+
+  if (interaction.customId.startsWith('restore_snapshot_refresh_')) {
+    const page = parseInt(interaction.customId.replace('restore_snapshot_refresh_', ''), 10);
+    if (executeFromPanel.restoreSnapshotPage) {
+      await executeFromPanel.restoreSnapshotPage(interaction, Number.isNaN(page) ? 0 : page);
+    } else {
+      await interaction.reply({ content: 'Restore snapshot picker is not available.', ephemeral: true });
+    }
+    return;
+  }
+
+  if (interaction.customId === 'restore_snapshot_advanced') {
+    if (executeFromPanel.advancedManualRestore) {
+      await executeFromPanel.advancedManualRestore(interaction);
+    } else {
+      await interaction.reply({ content: 'Advanced restore is not available.', ephemeral: true });
+    }
+    return;
+  }
+
+  if (interaction.customId.startsWith('restore_snapshot_confirm_')) {
+    const token = interaction.customId.replace('restore_snapshot_confirm_', '');
+    if (executeFromPanel.confirmManualRestore) {
+      await executeFromPanel.confirmManualRestore(interaction, token);
+    } else {
+      await interaction.reply({ content: 'Restore confirmation is not available.', ephemeral: true });
+    }
+    return;
+  }
+
+  if (interaction.customId.startsWith('restore_snapshot_cancel_')) {
+    const token = interaction.customId.replace('restore_snapshot_cancel_', '');
+    if (executeFromPanel.cancelManualRestore) {
+      await executeFromPanel.cancelManualRestore(interaction, token);
+    } else {
+      await interaction.reply({ content: 'Restore cancelled.', ephemeral: true });
+    }
+    return;
+  }
+
   // Defer for non-modal buttons
   try {
     await interaction.deferUpdate();

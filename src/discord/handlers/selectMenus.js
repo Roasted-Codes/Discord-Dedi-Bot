@@ -9,12 +9,17 @@ import {
   getInstance,
   isCurrentServer,
   calculateInstanceCost,
-  vultr
+  vultr,
+  getBotManagedSnapshots,
+  getCleanSnapshotName,
+  hasSnapshotPermission
 } from '../../vultr/index.js';
 import { instanceState } from '../../state/instanceState.js';
 import { formatRemainingTime } from '../../utils/formatters.js';
 import { SELF_DESTRUCT_COIN_MINUTES } from '../../config/constants.js';
 import { logger } from '../../utils/logger.js';
+import { releaseXlinkAssignment } from '../../xlink/credentials.js';
+import { DEFAULT_DEDI_SNAPSHOT_KEY } from '../../config/snapshots.js';
 
 // Will be set by main entry point
 let startInstanceDestructionPolling = null;
@@ -42,19 +47,101 @@ export async function handleSelectMenu(interaction) {
     case 'timer_select':
       await handleTimerSelect(interaction);
       break;
+    case 'restore_snapshot_select':
+      await handleRestoreSnapshotSelect(interaction);
+      break;
     default:
       logger.warn(`Unknown select menu: ${interaction.customId}`);
   }
 }
 
+function truncateDiscordText(value, maxLength) {
+  const text = String(value || '');
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, Math.max(0, maxLength - 1))}…`;
+}
+
+async function handleRestoreSnapshotSelect(interaction) {
+  if (!hasSnapshotPermission(interaction.user.id)) {
+    return interaction.reply({
+      content: 'You do not have permission to restore snapshots.',
+      ephemeral: true
+    });
+  }
+
+  const snapshotId = interaction.values[0];
+  const snapshots = await getBotManagedSnapshots();
+  const snapshot = snapshots.find(candidate => candidate.id === snapshotId);
+
+  if (!snapshot) {
+    return interaction.reply({
+      content: 'That snapshot is no longer available in the restore picker. Use Refresh and try again.',
+      ephemeral: true
+    });
+  }
+
+  const snapshotName = getCleanSnapshotName(snapshot);
+  const modal = new ModalBuilder()
+    .setCustomId(`restore_snapshot_settings_${snapshot.id}`)
+    .setTitle(truncateDiscordText(`Restore ${snapshotName}`, 45));
+
+  const nameInput = new TextInputBuilder()
+    .setCustomId('server_name')
+    .setLabel('Server Name (optional)')
+    .setStyle(TextInputStyle.Short)
+    .setPlaceholder('Leave blank for generated name')
+    .setRequired(false)
+    .setMaxLength(50);
+
+  const cityInput = new TextInputBuilder()
+    .setCustomId('server_city')
+    .setLabel('City/Region')
+    .setStyle(TextInputStyle.Short)
+    .setPlaceholder('dfw')
+    .setRequired(true)
+    .setMaxLength(10);
+
+  const timerInput = new TextInputBuilder()
+    .setCustomId('timer_minutes')
+    .setLabel('Timer minutes (0 = no timer)')
+    .setStyle(TextInputStyle.Short)
+    .setPlaceholder('210')
+    .setRequired(true)
+    .setMaxLength(4);
+
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(nameInput),
+    new ActionRowBuilder().addComponents(cityInput),
+    new ActionRowBuilder().addComponents(timerInput)
+  );
+
+  try {
+    await interaction.showModal(modal);
+  } catch (error) {
+    if (error.code === 10062) return;
+    throw error;
+  }
+}
+
 async function handleTimerSelect(interaction) {
-  // Value format: "regionId_minutes" or "regionId_custom"
-  const [regionId, minutesStr] = interaction.values[0].split('_');
+  // Current value format: "regionId|snapshotKey|minutes" or "regionId|snapshotKey|custom".
+  // Old pending menus used "regionId_minutes"; keep those as Classic.
+  const selectedValue = interaction.values[0];
+  let regionId;
+  let snapshotKey;
+  let minutesStr;
+
+  if (selectedValue.includes('|')) {
+    [regionId, snapshotKey, minutesStr] = selectedValue.split('|');
+  } else {
+    [regionId, minutesStr] = selectedValue.split('_');
+    snapshotKey = DEFAULT_DEDI_SNAPSHOT_KEY;
+  }
 
   // Handle custom timer - show modal (don't defer, modal needs fresh interaction)
   if (minutesStr === 'custom') {
     const modal = new ModalBuilder()
-      .setCustomId(`custom_timer_modal_${regionId}`)
+      .setCustomId(`custom_timer_modal_${regionId}|${snapshotKey}`)
       .setTitle('Custom Server Timer');
 
     const minutesInput = new TextInputBuilder()
@@ -95,7 +182,7 @@ async function handleTimerSelect(interaction) {
   }
 
   if (quickCreateWithTimer) {
-    await quickCreateWithTimer(interaction, regionId, timerMinutes);
+    await quickCreateWithTimer(interaction, regionId, timerMinutes, snapshotKey);
   } else {
     logger.error('quickCreateWithTimer function not set');
   }
@@ -200,6 +287,7 @@ async function handleDestroyServer(interaction) {
         startInstanceDestructionPolling(destroyId, serverName, formattedCost, interaction);
       } else {
         instanceState.updateInstance(destroyId, 'destroyed');
+        await releaseXlinkAssignment({ vultrInstanceId: destroyId });
       }
 
     } catch (deleteError) {

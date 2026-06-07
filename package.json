@@ -7,6 +7,13 @@
   "scripts": {
     "start": "node src/index.js",
     "start:legacy": "node index.legacy.js",
+    "agent:status": "bash scripts/agent-status.sh",
+    "deploy": "bash scripts/deploy-bot.sh",
+    "snapshot:list": "node scripts/snapshot-list.js",
+    "restore:dry-run": "node scripts/restore-dry-run.js",
+    "vultr:whoami": "node scripts/vultr-whoami.js",
+    "identity:dry-run": "node scripts/dry-run-server-identity.js",
+    "create:dry-run": "node scripts/dry-run-create-request.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [

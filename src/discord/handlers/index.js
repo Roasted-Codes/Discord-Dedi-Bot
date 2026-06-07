@@ -49,4 +49,9 @@ export { handleAutocomplete } from './autocomplete.js';
 export { handleCommand } from './commands.js';
 export { handleSelectMenu, setDestructionPollingFunction, setQuickCreateWithTimerFunction } from './selectMenus.js';
 export { handleButton, setPanelExecutors } from './buttons.js';
-export { handleModal, setModalPanelFunction, setModalQuickCreateFunction } from './modals.js';
+export {
+  handleModal,
+  setModalPanelFunction,
+  setModalQuickCreateFunction,
+  setModalManualRestoreFunction
+} from './modals.js';

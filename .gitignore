@@ -6,6 +6,10 @@ node_modules/
 
 # Persistent panel data
 panel_data.json
+data/*.json
+
+# Private credential pools
+secrets/
 
 # Logs
 *.log
@@ -17,6 +21,9 @@ Thumbs.db
 
 # Backups
 *.backup
+.env.backups/
+.env.bak-*
+.codex-backups/
 
 # Stashed files
 stash/
@@ -24,3 +31,6 @@ stash/
 # IDE configs
 .cursor/
 .vscode/
+
+# macOS archive sidecars
+._*
