@@ -21,7 +21,8 @@ import {
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
-  MessageFlags
+  MessageFlags,
+  Events
 } from './discord/client.js';
 import { fileURLToPath } from 'url';
 import path from 'path';
@@ -1510,7 +1511,7 @@ setPanelExecutors({
 // READY EVENT
 // ============================================================================
 
-client.once('ready', async () => {
+client.once(Events.ClientReady, async () => {
   logger.startup(client.user.tag);
 
   // Test Vultr API
