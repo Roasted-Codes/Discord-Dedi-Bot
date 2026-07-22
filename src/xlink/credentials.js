@@ -249,7 +249,7 @@ export function buildXlinkEnv({ credentials, cityLabel, regionLabel } = {}) {
     XLINK_KAI_PASSWORD: credentials.password,
     XLINK_KAI_AUTO_LOGIN: '1',
     XLINK_PRIVATE_ARENA_DESCRIPTION: descriptionParts.join(' - '),
-    XLINK_PRIVATE_ARENA_PASSWORD: 'lan',
+    XLINK_PRIVATE_ARENA_PASSWORD: process.env.XLINK_PRIVATE_ARENA_PASSWORD || 'lan',
     XLINK_AUTO_ARENA_PATH: 'Arena/XBox/First Person Shooter/Halo 2/North America/MLG',
     XLINK_PRIVATE_ARENA_MAX_PLAYERS: '99',
     XLINK_KAI_ARENA_STATUS: '3'

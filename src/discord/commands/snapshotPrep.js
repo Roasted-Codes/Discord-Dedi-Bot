@@ -136,7 +136,11 @@ export const snapshotPrepCommand = {
         .addChoices(
           { name: 'check', value: 'check' },
           { name: 'apply', value: 'apply' }
-        )),
+        ))
+    .addStringOption(option =>
+      option
+        .setName('confirm')
+        .setDescription('For apply mode, enter the exact selected server label')),
 
   async execute(interaction) {
     try {
@@ -150,6 +154,17 @@ export const snapshotPrepCommand = {
 
       if (!instance) {
         return interaction.editReply('Server not found.');
+      }
+
+      if (mode === 'apply') {
+        const confirmation = interaction.options.getString('confirm') || '';
+        const expectedConfirmation = String(instance.label || instance.id).trim();
+        if (confirmation !== expectedConfirmation) {
+          return interaction.editReply(
+            `Snapshot prep apply was not started. Re-run the command and enter the exact server label ` +
+            `\`${expectedConfirmation}\` in the confirm field.`
+          );
+        }
       }
 
       await interaction.editReply(

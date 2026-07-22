@@ -137,6 +137,24 @@ function getRequestUrl(request, config) {
   return new URL(request.url, `${proto}://${host}`);
 }
 
+export function normalizeRedirectDestination(candidate, config) {
+  const fallback = config.publicBaseUrl;
+  try {
+    const destination = new URL(candidate || '/', fallback);
+    const allowedDomain = String(config.cookieDomain || new URL(fallback).hostname)
+      .replace(/^\./, '')
+      .toLowerCase();
+    const hostname = destination.hostname.toLowerCase();
+    const allowedHost = hostname === allowedDomain || hostname.endsWith(`.${allowedDomain}`);
+    if (destination.protocol !== 'https:' || destination.username || destination.password || !allowedHost) {
+      return fallback;
+    }
+    return destination.toString();
+  } catch {
+    return fallback;
+  }
+}
+
 function sessionFromRequest(request, config) {
   const cookies = parseCookies(request.headers.cookie || '');
   const session = decodeSignedJson(cookies[SESSION_COOKIE], config.cookieSecret);
@@ -148,7 +166,9 @@ function sessionFromRequest(request, config) {
 
 async function handleLogin(request, response, config) {
   const url = getRequestUrl(request, config);
-  const rd = url.searchParams.get('rd') || `https://${request.headers['x-forwarded-host'] || request.headers.host || ''}/`;
+  const requestedDestination = url.searchParams.get('rd') ||
+    `https://${request.headers['x-forwarded-host'] || request.headers.host || ''}/`;
+  const rd = normalizeRedirectDestination(requestedDestination, config);
   const statePayload = {
     nonce: crypto.randomBytes(18).toString('base64url'),
     rd,
@@ -191,7 +211,7 @@ async function handleCallback(request, response, config) {
     exp: Date.now() + (config.sessionSeconds * 1000)
   }, config.cookieSecret);
 
-  redirect(response, statePayload.rd || '/', [
+  redirect(response, normalizeRedirectDestination(statePayload.rd, config), [
     cookie(SESSION_COOKIE, session, {
       maxAge: config.sessionSeconds,
       domain: config.cookieDomain

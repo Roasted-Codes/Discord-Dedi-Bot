@@ -113,6 +113,7 @@ function writeCaddyfileInPlace() {
   }
 
   fs.copyFileSync(TMP_CADDYFILE, CADDYFILE);
+  fs.chmodSync(CADDYFILE, 0o600);
   fs.unlinkSync(TMP_CADDYFILE);
 }
 
@@ -125,7 +126,7 @@ function main() {
   const base = readBaseCaddyfile();
   const managed = buildManagedCaddyfile(routes);
   const rendered = `${base}${base ? '\n\n' : ''}${MANAGED_START}\n${managed}${MANAGED_END}\n`;
-  fs.writeFileSync(TMP_CADDYFILE, rendered, { mode: 0o644 });
+  fs.writeFileSync(TMP_CADDYFILE, rendered, { mode: 0o600 });
 
   execFileSync('docker', [
     'run',
