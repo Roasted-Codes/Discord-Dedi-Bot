@@ -109,8 +109,8 @@ export async function sendAutoCleanupFollowUp(
 
     return followUp;
   } catch (error) {
-    if (error.code === 10062) {
-      logger.debug('Interaction expired');
+    if (error.code === 10062 || error.code === 50027) {
+      logger.debug('Interaction webhook expired');
       return null;
     }
     throw error;

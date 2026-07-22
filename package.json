@@ -15,7 +15,7 @@
     "identity:dry-run": "node scripts/dry-run-server-identity.js",
     "create:dry-run": "node scripts/dry-run-create-request.js",
     "xlink:audit": "node scripts/xlink-name-audit.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --test"
   },
   "keywords": [
     "discord",
