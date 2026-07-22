@@ -33,8 +33,6 @@ import {
   setDestructionPollingFunction,
   setPanelExecutors,
   setModalPanelFunction,
-  setQuickCreateWithTimerFunction,
-  setModalQuickCreateFunction,
   setModalManualRestoreFunction
 } from './discord/handlers/index.js';
 import { setPollingFunction } from './discord/commands/create.js';
@@ -50,19 +48,26 @@ import {
   calculateInstanceCost,
   isCurrentServer,
   createInstanceFromSnapshot,
+  getSnapshotRestoreSpec,
   getSnapshots,
   getBotManagedSnapshots,
   getCleanSnapshotName,
   hasSnapshotPermission
 } from './vultr/index.js';
-import { sendAutoCleanupFollowUp, sendServerCreationDM, sendServerDestructionDM } from './services/notifications.js';
+import {
+  buildSelkiesUrl,
+  buildXlinkUrl,
+  sendAutoCleanupFollowUp,
+  sendServerCreationDM,
+  sendServerDestructionDM
+} from './services/notifications.js';
 import { formatStatus, formatRemainingTime, formatInstanceDetails } from './utils/formatters.js';
 import { logger } from './utils/logger.js';
 import { createServerIdentity, getNextServerSequence } from './identity/serverIdentity.js';
 import { buildVultrUserData } from './identity/cloudInit.js';
 import {
-  DEDI_SNAPSHOT_CHOICES,
   DEFAULT_DEDI_SNAPSHOT_KEY,
+  formatDediSnapshotDescription,
   getDediSnapshotChoice,
   getDediSnapshotChoiceById
 } from './config/snapshots.js';
@@ -73,6 +78,12 @@ import {
   syncXlinkAssignmentsWithInstances,
   updateXlinkAssignmentInstance
 } from './xlink/credentials.js';
+import { buildSelkiesAccess, buildSelkiesEnv } from './selkies/access.js';
+import {
+  reconcileSelkiesRoutes,
+  removeSelkiesRoute,
+  upsertSelkiesRoute
+} from './selkies/routes.js';
 
 // Create Discord client
 const client = createDiscordClient();
@@ -83,6 +94,45 @@ const cleanupFunctions = [];
 // Banner image path
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const bannerPath = path.join(__dirname, '../assets/h2_banner.png');
+const PANEL_DUPLICATE_CLEANUP_INTERVAL_MS = 60 * 1000;
+const PANEL_BUTTON_IDS = new Set([
+  'btn_create_modal',
+  'btn_destroy',
+  'btn_restart',
+  'btn_insert_coin',
+  'btn_restore_snapshot'
+]);
+
+function isPanelButtonId(customId) {
+  return PANEL_BUTTON_IDS.has(customId) || customId?.startsWith('btn_quick_');
+}
+
+function getMessageComponentIds(message) {
+  const ids = [];
+  for (const row of message?.components || []) {
+    for (const component of row.components || []) {
+      const customId = component.customId || component.custom_id;
+      if (customId) ids.push(customId);
+    }
+  }
+  return ids;
+}
+
+function isBotPanelMessage(message) {
+  if (!message || message.author?.id !== client.user?.id) return false;
+
+  const content = message.content || '';
+  const componentIds = getMessageComponentIds(message);
+
+  return content.includes('Quick Create: Click a city button') ||
+    componentIds.some(isPanelButtonId);
+}
+
+function panelMessageFreshness(message) {
+  const editedAt = message.editedTimestamp || 0;
+  const createdAt = message.createdTimestamp || 0;
+  return Math.max(editedAt, createdAt);
+}
 
 async function getNextIdentitySequence() {
   try {
@@ -117,6 +167,43 @@ async function resolveCityName(regionId) {
   }
 
   return String(regionId || '').toUpperCase();
+}
+
+async function syncXlinkAssignmentsBeforeAssign() {
+  const instances = await listInstances();
+  await syncXlinkAssignmentsWithInstances(instances);
+}
+
+async function handleCreateFailureXlinkCleanup(error, identity) {
+  if (!identity) return;
+
+  if (error.keepXlinkAssignment && error.instanceId) {
+    try {
+      await updateXlinkAssignmentInstance(identity.server_id, error.instanceId);
+      logger.warn(`Kept XLink assignment ${identity.server_id} for unconfirmed instance ${error.instanceId.slice(0, 8)}...`);
+    } catch (updateError) {
+      logger.error('Failed to pin XLink assignment to unconfirmed instance:', updateError.message);
+    }
+    return;
+  }
+
+  await releaseXlinkAssignment({ serverId: identity.server_id });
+}
+
+async function registerSelkiesRouteForInstance(instanceId, instance, trackedInstance = null) {
+  const tracked = trackedInstance || instanceState.getInstance(instanceId);
+  if (!tracked?.selkiesUsername || !tracked?.selkiesPassword) {
+    return null;
+  }
+
+  return upsertSelkiesRoute({
+    instanceId,
+    serverId: tracked.serverId || instance.label || tracked.name,
+    ip: instance.main_ip || tracked.ip,
+    creatorId: tracked.creator?.id,
+    selkiesUsername: tracked.selkiesUsername,
+    selkiesPassword: tracked.selkiesPassword
+  });
 }
 
 function getSnapshotDisplayName(snapshot) {
@@ -300,11 +387,19 @@ async function startInstanceStatusPolling(instanceId, serverName, region, intera
               serverId: trackedInstance?.serverId,
               hostname: trackedInstance?.hostname,
               friendlyHostname: trackedInstance?.friendlyHostname,
-              snapshotLabel: trackedInstance?.snapshotLabel
+              snapshotLabel: trackedInstance?.snapshotLabel,
+              selkiesUsername: trackedInstance?.selkiesUsername,
+              selkiesPassword: trackedInstance?.selkiesPassword
             });
           } catch (e) {
             logger.debug('Failed to send creation DM:', e.message);
           }
+        }
+
+        try {
+          await registerSelkiesRouteForInstance(instanceId, instance);
+        } catch (error) {
+          logger.warn(`Failed to register Selkies route for ${instanceId.slice(0, 8)}...: ${error.message}`);
         }
 
         await initializeSelfDestructTimer(instanceId);
@@ -408,6 +503,7 @@ async function startInstanceDestructionPolling(instanceId, serverName, cost, int
 
       if (!instance) {
         instanceState.updateInstance(instanceId, 'destroyed', { selfDestructTimer: null });
+        await removeSelkiesRoute({ instanceId });
         await releaseXlinkAssignment({ vultrInstanceId: instanceId });
         try {
           await sendServerDestructionDM(interaction.user, serverName, cost);
@@ -430,6 +526,7 @@ async function startInstanceDestructionPolling(instanceId, serverName, cost, int
     } catch (error) {
       if (error.response?.status === 404 || error.response?.status === 403) {
         instanceState.updateInstance(instanceId, 'destroyed', { selfDestructTimer: null });
+        await removeSelkiesRoute({ instanceId });
         await releaseXlinkAssignment({ vultrInstanceId: instanceId });
         try {
           await sendServerDestructionDM(interaction.user, serverName, cost);
@@ -476,11 +573,6 @@ async function generatePanelComponents(showQuickActions = true) {
         .setCustomId('btn_restart')
         .setLabel('Restart')
         .setStyle(ButtonStyle.Secondary)
-        .setDisabled(stats.total === 0),
-      new ButtonBuilder()
-        .setCustomId('btn_insert_coin')
-        .setLabel('Insert Coin')
-        .setStyle(ButtonStyle.Success)
         .setDisabled(stats.total === 0),
       new ButtonBuilder()
         .setCustomId('btn_restore_snapshot')
@@ -550,7 +642,23 @@ async function formatServersForPanel(guild) {
       content += `${status.emoji} **${serverName}**${statusText}\n`;
 
       if (instance.main_ip && instance.main_ip !== '0.0.0.0') {
-        content += `> Xlink: http://${instance.main_ip}:34522\n`;
+        const linkDetails = {
+          ip: instance.main_ip,
+          serverId: tracked?.serverId || instance.label,
+          serverName,
+          hostname: tracked?.hostname,
+          friendlyHostname: tracked?.friendlyHostname
+        };
+        const selkiesUrl = buildSelkiesUrl(linkDetails);
+        const xlinkUrl = buildXlinkUrl(linkDetails);
+
+        if (selkiesUrl) {
+          content += `> Selkies: ${selkiesUrl}\n`;
+        }
+
+        if (xlinkUrl) {
+          content += `> XLink Kai: ${xlinkUrl}\n`;
+        }
       } else if (isCreating) {
         content += `> Waiting for IP...\n`;
       }
@@ -587,6 +695,83 @@ async function formatServersForPanel(guild) {
 
 let panelUpdateInProgress = false;
 let pendingPanelUpdate = false;
+let lastPanelDuplicateCleanupAt = 0;
+
+async function findPanelMessages(channel) {
+  const messages = await channel.messages.fetch({ limit: 100 });
+  return [...messages.values()]
+    .filter(isBotPanelMessage)
+    .sort((a, b) => panelMessageFreshness(b) - panelMessageFreshness(a));
+}
+
+async function resolveCanonicalPanelMessage(channel) {
+  if (panelData.messageId) {
+    try {
+      const message = await channel.messages.fetch(panelData.messageId);
+      if (isBotPanelMessage(message)) {
+        return message;
+      }
+    } catch (error) {
+      logger.warn(`Saved panel message ${panelData.messageId} could not be fetched: ${error.message}`);
+    }
+  }
+
+  const panelMessages = await findPanelMessages(channel);
+  const canonical = panelMessages[0] || null;
+  if (canonical) {
+    panelData.messageId = canonical.id;
+    panelData.channelId = channel.id;
+    savePanelData();
+    logger.warn(`Recovered canonical panel message ${canonical.id}`);
+  }
+
+  return canonical;
+}
+
+async function retireDuplicatePanelMessage(message) {
+  try {
+    await message.delete();
+    logger.info(`Deleted duplicate panel message ${message.id}`);
+    return;
+  } catch (deleteError) {
+    logger.warn(`Could not delete duplicate panel ${message.id}: ${deleteError.message}`);
+  }
+
+  try {
+    await message.edit({
+      content: 'Superseded control panel. Use the latest panel message.',
+      components: [],
+      attachments: []
+    });
+    logger.info(`Disabled duplicate panel message ${message.id}`);
+  } catch (editError) {
+    logger.warn(`Could not disable duplicate panel ${message.id}: ${editError.message}`);
+  }
+}
+
+async function cleanupDuplicatePanelMessages(channel, canonicalMessageId, force = false) {
+  const now = Date.now();
+  if (!force && now - lastPanelDuplicateCleanupAt < PANEL_DUPLICATE_CLEANUP_INTERVAL_MS) {
+    return;
+  }
+
+  lastPanelDuplicateCleanupAt = now;
+
+  try {
+    const panelMessages = await findPanelMessages(channel);
+    const duplicateMessages = panelMessages.filter(message => message.id !== canonicalMessageId);
+
+    for (const message of duplicateMessages) {
+      await retireDuplicatePanelMessage(message);
+    }
+
+    if (duplicateMessages.length > 0) {
+      logger.info(`Retired ${duplicateMessages.length} duplicate panel message(s)`);
+    }
+  } catch (error) {
+    logger.warn(`Duplicate panel cleanup failed: ${error.message}`);
+  }
+}
 
 async function updatePanel(interaction = null, channel = null) {
   if (panelUpdateInProgress) {
@@ -639,24 +824,28 @@ async function updatePanel(interaction = null, channel = null) {
 
     const banner = new AttachmentBuilder(bannerPath);
 
-    // Update or create panel message
-    if (panelData.messageId) {
-      try {
-        const message = await targetChannel.messages.fetch(panelData.messageId);
-        await message.edit({ content, files: [banner], components });
-      } catch (e) {
-        // Message deleted, create new one
-        const newMessage = await targetChannel.send({ content, files: [banner], components });
-        panelData.messageId = newMessage.id;
-        panelData.channelId = targetChannel.id;
-        savePanelData();
-      }
+    let panelMessage = await resolveCanonicalPanelMessage(targetChannel);
+    let createdPanel = false;
+
+    if (panelMessage) {
+      await panelMessage.edit({ content, files: [banner], components });
+      panelData.messageId = panelMessage.id;
+      panelData.channelId = targetChannel.id;
+      savePanelData();
     } else {
       const newMessage = await targetChannel.send({ content, files: [banner], components });
       panelData.messageId = newMessage.id;
       panelData.channelId = targetChannel.id;
       savePanelData();
+      panelMessage = newMessage;
+      createdPanel = true;
     }
+
+    await cleanupDuplicatePanelMessages(
+      targetChannel,
+      panelMessage.id,
+      createdPanel || Boolean(interaction)
+    );
 
     if (interaction && !interaction.replied && !interaction.deferred) {
       // Already handled by creating/editing panel
@@ -791,9 +980,9 @@ async function executeAdvancedManualRestore(interaction) {
 
   const nameInput = new TextInputBuilder()
     .setCustomId('server_name')
-    .setLabel('Server Name (optional)')
+    .setLabel('Server Name note (optional)')
     .setStyle(TextInputStyle.Short)
-    .setPlaceholder('Leave blank for generated name')
+    .setPlaceholder('Final Vultr/StatsBorg name comes from XLink')
     .setRequired(false)
     .setMaxLength(50);
 
@@ -851,14 +1040,8 @@ async function executeManualRestoreConfirmation(interaction, {
   }
 
   const cityName = await resolveCityName(regionId);
-  const identity = createServerIdentity({
-    gamertag: requestedName || undefined,
-    sequence: await getNextIdentitySequence(),
-    region: regionId,
-    creator: interaction.user.username,
-    domain: process.env.REALONES_DOMAIN || 'realones.gg'
-  });
   const snapshotLabel = getSnapshotDisplayName(snapshot);
+  const restoreSpec = getSnapshotRestoreSpec(snapshot.id);
   const token = storePendingManualRestore({
     userId: interaction.user.id,
     snapshotId,
@@ -866,7 +1049,6 @@ async function executeManualRestoreConfirmation(interaction, {
     regionId,
     timerMinutes,
     cityName,
-    identity,
     snapshotLabel
   });
 
@@ -888,9 +1070,10 @@ async function executeManualRestoreConfirmation(interaction, {
       `Created: ${formatSnapshotDate(snapshot)}\n` +
       `Snapshot ID: \`${snapshot.id}\` (...${getSnapshotShortId(snapshot)})\n` +
       `Region: ${cityName} (${regionId.toUpperCase()})\n` +
-      `Server name: ${identity.display_name}\n` +
+      `Server name: assigned XLink account\n` +
       `Timer: ${timerMinutes === 0 ? 'none' : `${timerMinutes} minutes`}\n` +
-      `Plan: \`${config.vultr.plan}\`\n\n` +
+      `Plan: \`${restoreSpec.plan}\` (${restoreSpec.planSource})\n` +
+      `${restoreSpec.sourceSummary ? `Source spec: ${restoreSpec.sourceSummary}\n` : ''}\n` +
       `Click Restore to create the server from this snapshot.`,
     components: [confirmRow]
   });
@@ -930,7 +1113,7 @@ async function executeConfirmManualRestore(interaction, token) {
 
   pendingManualRestores.delete(token);
   await interaction.editReply({
-    content: `Restoring **${pending.identity.display_name}** from **${pending.snapshotLabel}**...`,
+    content: `Restoring from **${pending.snapshotLabel}**...`,
     components: []
   });
 
@@ -954,38 +1137,7 @@ async function executeCancelManualRestore(interaction, token) {
 }
 
 async function executeQuickCreate(interaction, regionId) {
-  const groupedRegions = await getGroupedRegions();
-  let cityName = regionId.toUpperCase();
-
-  for (const [continent, countries] of Object.entries(groupedRegions)) {
-    for (const [country, cities] of Object.entries(countries)) {
-      const city = cities.find(c => c.id === regionId);
-      if (city) {
-        cityName = city.city;
-        break;
-      }
-    }
-    if (cityName !== regionId.toUpperCase()) break;
-  }
-
-  // Show snapshot and timer selection dropdown.
-  const timerOptions = DEDI_SNAPSHOT_CHOICES.flatMap(snapshot => [
-    { label: `${snapshot.label} - 3.5 hours`, value: `${regionId}|${snapshot.key}|210` },
-    { label: `${snapshot.label} - Custom time...`, value: `${regionId}|${snapshot.key}|custom` }
-  ]);
-
-  const row = new ActionRowBuilder()
-    .addComponents(
-      new StringSelectMenuBuilder()
-        .setCustomId('timer_select')
-        .setPlaceholder('Select server lifetime')
-        .addOptions(timerOptions)
-    );
-
-  return sendAutoCleanupFollowUp(interaction, {
-    content: `**Create Server in ${cityName}**\n\nSelect a snapshot and server lifetime:`,
-    components: [row]
-  });
+  return executeQuickCreateWithTimer(interaction, regionId, 0);
 }
 
 async function executeManualRestoreFromSnapshot(interaction, {
@@ -993,11 +1145,10 @@ async function executeManualRestoreFromSnapshot(interaction, {
   requestedName,
   regionId,
   timerMinutes,
-  identity: preparedIdentity = null,
   cityName: preparedCityName = null,
   snapshotLabel: preparedSnapshotLabel = null
 }) {
-  let identity = preparedIdentity;
+  let identity = null;
   let xlink = null;
 
   try {
@@ -1022,33 +1173,33 @@ async function executeManualRestoreFromSnapshot(interaction, {
     const cityName = preparedCityName || await resolveCityName(regionId);
     const snapshotLabel = preparedSnapshotLabel || getSnapshotDisplayName(snapshot);
 
-    if (!identity) {
-      identity = createServerIdentity({
-        gamertag: requestedName || undefined,
-        sequence: await getNextIdentitySequence(),
-        region: regionId,
-        creator: interaction.user.username,
-        domain: process.env.REALONES_DOMAIN || 'realones.gg'
-      });
-    }
-    const serverName = identity.display_name;
-
+    await syncXlinkAssignmentsBeforeAssign();
     xlink = await assignXlinkAccount({
-      serverId: identity.server_id,
       region: regionId,
       cityLabel: cityName,
       creator: interaction.user.username
     });
+    identity = createServerIdentity({
+      serverId: xlink.assignment.server_id,
+      displayName: xlink.assignment.xtag,
+      sequence: await getNextIdentitySequence(),
+      region: regionId,
+      creator: interaction.user.username,
+      domain: process.env.REALONES_DOMAIN || ''
+    });
+    const serverName = identity.display_name;
     const xlinkEnv = buildXlinkEnv({
       credentials: xlink.credentials,
       cityLabel: cityName
     });
+    const selkiesAccess = buildSelkiesAccess();
+    const selkiesEnv = buildSelkiesEnv(selkiesAccess);
 
     const instance = await createInstanceFromSnapshot(
       snapshot.id,
       identity.server_id,
       regionId,
-      { userData: buildVultrUserData(identity, { extraEnv: xlinkEnv }) }
+      { userData: buildVultrUserData(identity, { extraEnv: { ...xlinkEnv, ...selkiesEnv } }) }
     );
 
     if (!instance?.id) {
@@ -1080,7 +1231,9 @@ async function executeManualRestoreFromSnapshot(interaction, {
         snapshotId: snapshot.id,
         snapshotLabel,
         xlinkXtag: xlink.assignment.xtag,
-        xlinkCityLabel: cityName
+        xlinkCityLabel: cityName,
+        selkiesUsername: selkiesAccess.username,
+        selkiesPassword: selkiesAccess.password
       }
     );
 
@@ -1091,14 +1244,15 @@ async function executeManualRestoreFromSnapshot(interaction, {
       `Snapshot ID: \`${snapshot.id}\`\n` +
       `XLink Xtag: \`${xlink.assignment.xtag}\`\n` +
       `Timer: ${timerMinutes === 0 ? 'none' : `${timerMinutes} minutes`}\n` +
-      `XLink auto-login: configured`
+      `XLink auto-login: configured\n` +
+      `Selkies login: configured`
     );
 
     startInstanceStatusPolling(instance.id, serverName, regionId, interaction, null, true);
     setTimeout(() => updatePanel(), 5000);
   } catch (error) {
     if (identity && xlink) {
-      await releaseXlinkAssignment({ serverId: identity.server_id });
+      await handleCreateFailureXlinkCleanup(error, identity);
     }
     logger.error('Manual snapshot restore failed:', error.message);
     await interaction.editReply(`Manual restore failed: ${error.message}`);
@@ -1131,30 +1285,33 @@ async function executeQuickCreateWithTimer(
   try {
     const { createInstanceFromSnapshot } = await import('./vultr/index.js');
     const snapshotChoice = getDediSnapshotChoice(snapshotKey);
-    identity = createServerIdentity({
-      sequence: await getNextIdentitySequence(),
-      region: regionId,
-      creator: interaction.user.username,
-      domain: process.env.REALONES_DOMAIN || 'realones.gg'
-    });
-    const serverName = identity.display_name;
-
+    await syncXlinkAssignmentsBeforeAssign();
     xlink = await assignXlinkAccount({
-      serverId: identity.server_id,
       region: regionId,
       cityLabel: cityName,
       creator: interaction.user.username
     });
+    identity = createServerIdentity({
+      serverId: xlink.assignment.server_id,
+      displayName: xlink.assignment.xtag,
+      sequence: await getNextIdentitySequence(),
+      region: regionId,
+      creator: interaction.user.username,
+      domain: process.env.REALONES_DOMAIN || ''
+    });
+    const serverName = identity.display_name;
     const xlinkEnv = buildXlinkEnv({
       credentials: xlink.credentials,
       cityLabel: cityName
     });
+    const selkiesAccess = buildSelkiesAccess();
+    const selkiesEnv = buildSelkiesEnv(selkiesAccess);
 
     const instance = await createInstanceFromSnapshot(
       snapshotChoice.id,
       identity.server_id,
       regionId,
-      { userData: buildVultrUserData(identity, { extraEnv: xlinkEnv }) }
+      { userData: buildVultrUserData(identity, { extraEnv: { ...xlinkEnv, ...selkiesEnv } }) }
     );
 
     if (instance?.id) {
@@ -1171,7 +1328,7 @@ async function executeQuickCreateWithTimer(
         {
           name: serverName,
           region: regionId,
-          timerMinutes,
+          timerMinutes: 0,
           serverId: identity.server_id,
           displayName: identity.display_name,
           hostname: identity.hostname,
@@ -1181,7 +1338,9 @@ async function executeQuickCreateWithTimer(
           snapshotId: snapshotChoice.id,
           snapshotLabel: snapshotChoice.label,
           xlinkXtag: xlink.assignment.xtag,
-          xlinkCityLabel: cityName
+          xlinkCityLabel: cityName,
+          selkiesUsername: selkiesAccess.username,
+          selkiesPassword: selkiesAccess.password
         }
       );
 
@@ -1189,8 +1348,11 @@ async function executeQuickCreateWithTimer(
         `Creating "${serverName}" in ${cityName} (${regionId.toUpperCase()}).\n` +
         `Server ID: \`${identity.server_id}\`\n` +
         `Snapshot: \`${snapshotChoice.label}\`\n` +
+        `Snapshot notes: ${formatDediSnapshotDescription(snapshotChoice)}\n` +
+        `Timer: \`none\`\n` +
         `XLink Xtag: \`${xlink.assignment.xtag}\`\n` +
-        `XLink auto-login: configured`
+        `XLink auto-login: configured\n` +
+        `Selkies login: configured`
       );
       startInstanceStatusPolling(instance.id, serverName, regionId, interaction, null, true);
       setTimeout(() => updatePanel(), 5000);
@@ -1200,7 +1362,7 @@ async function executeQuickCreateWithTimer(
     }
   } catch (error) {
     if (identity && xlink) {
-      await releaseXlinkAssignment({ serverId: identity.server_id });
+      await handleCreateFailureXlinkCleanup(error, identity);
     }
     if (error.message !== 'No snapshots available.') {
       logger.debug('Quick create error cleanup path:', error.message);
@@ -1234,6 +1396,10 @@ function startSelfDestructPolling() {
           try {
             await vultr.instances.deleteInstance({ "instance-id": tracked.id });
             instanceState.updateInstance(tracked.id, 'destroyed', { selfDestructTimer: null });
+            await removeSelkiesRoute({
+              instanceId: tracked.id,
+              serverId: tracked.serverId
+            });
             await releaseXlinkAssignment({
               vultrInstanceId: tracked.id,
               serverId: tracked.serverId
@@ -1319,8 +1485,6 @@ setSnapshotPollingFunction(startSnapshotStatusPolling);
 setPanelFunction(updatePanel);
 setDestructionPollingFunction(startInstanceDestructionPolling);
 setModalPanelFunction(updatePanel);
-setQuickCreateWithTimerFunction(executeQuickCreateWithTimer);
-setModalQuickCreateFunction(executeQuickCreateWithTimer);
 setModalManualRestoreFunction(executeManualRestoreConfirmation);
 setPanelExecutors({
   destroy: executeDestroyFromPanel,
@@ -1330,8 +1494,7 @@ setPanelExecutors({
   advancedManualRestore: executeAdvancedManualRestore,
   confirmManualRestore: executeConfirmManualRestore,
   cancelManualRestore: executeCancelManualRestore,
-  quickCreate: executeQuickCreate,
-  quickCreateWithTimer: executeQuickCreateWithTimer
+  quickCreate: executeQuickCreate
 });
 
 // ============================================================================
@@ -1346,6 +1509,11 @@ client.once('ready', async () => {
     const testResponse = await vultr.instances.listInstances();
     logger.info('Vultr API connected');
     await syncXlinkAssignmentsWithInstances(testResponse.instances || []);
+    try {
+      await reconcileSelkiesRoutes(testResponse.instances || []);
+    } catch (error) {
+      logger.warn(`Selkies route reconciliation failed: ${error.message}`);
+    }
 
     // Recover existing instances
     if (testResponse.instances) {

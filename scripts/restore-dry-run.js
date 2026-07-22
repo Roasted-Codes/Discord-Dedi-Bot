@@ -4,6 +4,7 @@ import {
   getSnapshots,
   getCleanSnapshotName,
   isBotManagedSnapshot,
+  getSnapshotRestoreSpec,
   getGroupedRegions,
   listInstances
 } from '../src/vultr/index.js';
@@ -88,15 +89,18 @@ try {
   const selectedRegion = regions.find(region => region.id === args.region);
   const instances = await listInstances();
   const sequence = getNextServerSequence(instances);
+  const xlinkAvailability = getXlinkAvailability();
+  const xlinkXtag = args.serverName || xlinkAvailability.available_xtags[0] || 'no_xlink_available';
   const identity = createServerIdentity({
+    serverId: xlinkXtag,
+    displayName: xlinkXtag,
     sequence,
     region: args.region,
     creator: args.creator,
-    domain: process.env.REALONES_DOMAIN || 'realones.gg'
+    domain: process.env.REALONES_DOMAIN || ''
   });
-  const xlinkAvailability = getXlinkAvailability();
-  const generatedServerName = args.serverName || identity.server_id;
   const isManaged = isBotManagedSnapshot(snapshot);
+  const restoreSpec = getSnapshotRestoreSpec(snapshot.id);
 
   console.log('Restore snapshot dry-run');
   console.log('');
@@ -108,11 +112,14 @@ try {
   printLine('bot_managed:', isManaged ? 'true' : 'false');
   printLine('region:', args.region);
   printLine('region_city:', selectedRegion ? `${selectedRegion.city}, ${selectedRegion.country}` : 'not found in filtered region list');
-  printLine('server_name:', generatedServerName);
+  printLine('server_name:', identity.display_name);
+  printLine('xlink_xtag:', xlinkXtag);
   printLine('identity_preview:', identity.server_id);
   printLine('hostname_preview:', identity.hostname);
   printLine('timer_minutes:', String(args.timer));
-  printLine('vultr_plan:', config.vultr.plan);
+  printLine('vultr_plan:', restoreSpec.plan);
+  printLine('plan_source:', restoreSpec.planSource);
+  printLine('source_spec:', restoreSpec.sourceSummary || 'not recorded');
   printLine('active_instances:', String(instances.length));
   printLine('xlink_total:', String(xlinkAvailability.total_accounts));
   printLine('xlink_active:', String(xlinkAvailability.active_assignment_count));

@@ -68,6 +68,7 @@ export const snapshotCommand = {
         `**Snapshot Creation**\n\n` +
         `Server: ${instance.label || 'Unnamed Server'}\n` +
         `Current Power: ${instance.power_status || 'unknown'}\n` +
+        `Source Plan: \`${instance.plan || 'unknown'}\`\n` +
         `Snapshot Name: ${snapshotName}\n` +
         `${isPublic ? 'Visibility: Public' : 'Visibility: Private'}\n` +
         `Cost: ~$0.05/GB/month\n` +
@@ -75,7 +76,11 @@ export const snapshotCommand = {
         `Creating snapshot...`
       );
 
-      const snapshot = await createSnapshotFromInstance(serverId, description);
+      const snapshot = await createSnapshotFromInstance(serverId, description, {
+        sourceInstance: instance,
+        visibility: isPublic ? 'public' : 'private',
+        recordedBy: interaction.user.username
+      });
 
       if (!snapshot?.id) {
         return interaction.editReply('Failed to create snapshot. Please try again later.');
@@ -84,6 +89,7 @@ export const snapshotCommand = {
       await interaction.editReply(
         `Snapshot "${snapshotName}" creation started!\n` +
         `From Server: ${instance.label || 'Unnamed Server'}\n` +
+        `Source Plan: \`${instance.plan || 'unknown'}\`\n` +
         `Power state at request: ${instance.power_status || 'unknown'}\n` +
         `Please be patient - snapshot creation typically takes 5-15 minutes.\n` +
         `${isPublic ? 'Will be available to all users when complete' : 'Private snapshot for admin use'}`

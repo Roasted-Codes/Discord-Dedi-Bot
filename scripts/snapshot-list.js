@@ -2,7 +2,8 @@
 import {
   getSnapshots,
   getCleanSnapshotName,
-  isBotManagedSnapshot
+  isBotManagedSnapshot,
+  getSnapshotRestoreSpec
 } from '../src/vultr/index.js';
 
 function parseArgs(argv) {
@@ -40,6 +41,7 @@ function formatSize(snapshot) {
 }
 
 function snapshotSummary(snapshot) {
+  const restoreSpec = getSnapshotRestoreSpec(snapshot.id);
   return {
     id: snapshot.id,
     id_suffix: snapshot.id ? snapshot.id.slice(-8) : '',
@@ -47,7 +49,10 @@ function snapshotSummary(snapshot) {
     description: snapshot.description || '',
     status: snapshot.status || 'unknown',
     created: snapshot.date_created || null,
-    size: formatSize(snapshot)
+    size: formatSize(snapshot),
+    restore_plan: restoreSpec.plan,
+    plan_source: restoreSpec.planSource,
+    source_spec: restoreSpec.sourceSummary || null
   };
 }
 
@@ -82,6 +87,10 @@ try {
         console.log(`    created: ${summary.created || 'unknown'}`);
         console.log(`    size:    ${summary.size}`);
         console.log(`    status:  ${summary.status}`);
+        console.log(`    plan:    ${summary.restore_plan} (${summary.plan_source})`);
+        if (summary.source_spec) {
+          console.log(`    source:  ${summary.source_spec}`);
+        }
         console.log(`    id:      ...${summary.id_suffix} (${summary.id})`);
       });
     }

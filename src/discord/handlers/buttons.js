@@ -16,6 +16,7 @@ import {
   rebootInstanceApi
 } from '../../vultr/index.js';
 import { instanceState } from '../../state/instanceState.js';
+import { panelData } from '../../state/panelState.js';
 import { sendAutoCleanupFollowUp } from '../../services/notifications.js';
 import { formatRemainingTime } from '../../utils/formatters.js';
 import { SELF_DESTRUCT_COIN_MINUTES } from '../../config/constants.js';
@@ -23,12 +24,46 @@ import { logger } from '../../utils/logger.js';
 
 // Will be set by main entry point
 let executeFromPanel = {};
+const PANEL_BUTTON_IDS = new Set([
+  'btn_create_modal',
+  'btn_destroy',
+  'btn_restart',
+  'btn_insert_coin',
+  'btn_restore_snapshot'
+]);
 
 export function setPanelExecutors(executors) {
   executeFromPanel = executors;
 }
 
+function isPanelButton(customId) {
+  return PANEL_BUTTON_IDS.has(customId) || customId?.startsWith('btn_quick_');
+}
+
+async function rejectStalePanelInteraction(interaction) {
+  const payload = {
+    content: 'This is an old control panel. Use the latest panel message.',
+    ephemeral: true
+  };
+
+  if (interaction.replied || interaction.deferred) {
+    await interaction.followUp(payload);
+  } else {
+    await interaction.reply(payload);
+  }
+}
+
 export async function handleButton(interaction) {
+  if (
+    isPanelButton(interaction.customId) &&
+    panelData.messageId &&
+    interaction.message?.id !== panelData.messageId
+  ) {
+    logger.warn(`Rejected stale panel button ${interaction.customId} from message ${interaction.message?.id}`);
+    await rejectStalePanelInteraction(interaction);
+    return;
+  }
+
   // Handle create modal button
   if (interaction.customId === 'btn_create_modal') {
     try {

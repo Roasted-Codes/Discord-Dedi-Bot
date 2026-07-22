@@ -106,6 +106,11 @@ function isPendingFresh(assignment, now = Date.now()) {
   if (assignment.vultr_instance_id) {
     return true;
   }
+
+  return isPendingAssignmentRecent(assignment, now);
+}
+
+function isPendingAssignmentRecent(assignment, now = Date.now()) {
   const assignedAt = Date.parse(assignment.assigned_at || '');
   return Number.isFinite(assignedAt) && now - assignedAt < PENDING_ASSIGNMENT_TTL_MS;
 }
@@ -143,8 +148,9 @@ export async function assignXlinkAccount({
     }
 
     const selected = chooseRandom(availableAccounts, random);
+    const resolvedServerId = serverId || selected.xtag;
     const assignment = normalizeAssignment({
-      server_id: serverId,
+      server_id: resolvedServerId,
       xtag: selected.xtag,
       region,
       city_label: cityLabel,
@@ -153,7 +159,7 @@ export async function assignXlinkAccount({
     });
 
     saveAssignments([
-      ...assignments.filter(item => item.server_id !== serverId),
+      ...assignments.filter(item => item.server_id !== resolvedServerId),
       assignment
     ]);
 
@@ -223,21 +229,29 @@ export async function syncXlinkAssignmentsWithInstances(instances = []) {
       if (assignment.server_id && activeLabels.has(assignment.server_id)) {
         return true;
       }
-      return isPendingFresh(assignment);
+      return isPendingAssignmentRecent(assignment);
     });
     saveAssignments(assignments);
   });
 }
 
-export function buildXlinkEnv({ credentials, cityLabel } = {}) {
+export function buildXlinkEnv({ credentials, cityLabel, regionLabel } = {}) {
   if (!credentials?.username || !credentials?.password) {
     return {};
   }
+
+  const descriptionParts = ['RealOnesV2 Server', cityLabel || regionLabel]
+    .map(value => String(value || '').trim())
+    .filter(Boolean);
 
   return {
     XLINK_KAI_USERNAME: credentials.username,
     XLINK_KAI_PASSWORD: credentials.password,
     XLINK_KAI_AUTO_LOGIN: '1',
-    XLINK_PRIVATE_ARENA_DESCRIPTION: `RealOnesV2 - ${cityLabel || 'Unknown Region'}`
+    XLINK_PRIVATE_ARENA_DESCRIPTION: descriptionParts.join(' - '),
+    XLINK_PRIVATE_ARENA_PASSWORD: 'lan',
+    XLINK_AUTO_ARENA_PATH: 'Arena/XBox/First Person Shooter/Halo 2/North America/MLG',
+    XLINK_PRIVATE_ARENA_MAX_PLAYERS: '99',
+    XLINK_KAI_ARENA_STATUS: '3'
   };
 }

@@ -19,18 +19,12 @@ import { formatRemainingTime } from '../../utils/formatters.js';
 import { SELF_DESTRUCT_COIN_MINUTES } from '../../config/constants.js';
 import { logger } from '../../utils/logger.js';
 import { releaseXlinkAssignment } from '../../xlink/credentials.js';
-import { DEFAULT_DEDI_SNAPSHOT_KEY } from '../../config/snapshots.js';
 
 // Will be set by main entry point
 let startInstanceDestructionPolling = null;
-let quickCreateWithTimer = null;
 
 export function setDestructionPollingFunction(fn) {
   startInstanceDestructionPolling = fn;
-}
-
-export function setQuickCreateWithTimerFunction(fn) {
-  quickCreateWithTimer = fn;
 }
 
 export async function handleSelectMenu(interaction) {
@@ -43,9 +37,6 @@ export async function handleSelectMenu(interaction) {
       break;
     case 'insert_coin_server':
       await handleInsertCoin(interaction);
-      break;
-    case 'timer_select':
-      await handleTimerSelect(interaction);
       break;
     case 'restore_snapshot_select':
       await handleRestoreSnapshotSelect(interaction);
@@ -120,71 +111,6 @@ async function handleRestoreSnapshotSelect(interaction) {
   } catch (error) {
     if (error.code === 10062) return;
     throw error;
-  }
-}
-
-async function handleTimerSelect(interaction) {
-  // Current value format: "regionId|snapshotKey|minutes" or "regionId|snapshotKey|custom".
-  // Old pending menus used "regionId_minutes"; keep those as Classic.
-  const selectedValue = interaction.values[0];
-  let regionId;
-  let snapshotKey;
-  let minutesStr;
-
-  if (selectedValue.includes('|')) {
-    [regionId, snapshotKey, minutesStr] = selectedValue.split('|');
-  } else {
-    [regionId, minutesStr] = selectedValue.split('_');
-    snapshotKey = DEFAULT_DEDI_SNAPSHOT_KEY;
-  }
-
-  // Handle custom timer - show modal (don't defer, modal needs fresh interaction)
-  if (minutesStr === 'custom') {
-    const modal = new ModalBuilder()
-      .setCustomId(`custom_timer_modal_${regionId}|${snapshotKey}`)
-      .setTitle('Custom Server Timer');
-
-    const minutesInput = new TextInputBuilder()
-      .setCustomId('timer_minutes')
-      .setLabel('Timer duration in minutes (0 = no timer)')
-      .setStyle(TextInputStyle.Short)
-      .setPlaceholder('210')
-      .setRequired(true)
-      .setMaxLength(4);
-
-    const row = new ActionRowBuilder().addComponents(minutesInput);
-    modal.addComponents(row);
-
-    try {
-      await interaction.showModal(modal);
-    } catch (e) {
-      if (e.code === 10062) return;
-      throw e;
-    }
-    return;
-  }
-
-  // Standard timer selection
-  try {
-    await interaction.deferUpdate();
-  } catch (e) {
-    if (e.code === 10062) return;
-    throw e;
-  }
-
-  const timerMinutes = parseInt(minutesStr, 10);
-
-  // Clear the dropdown message
-  try {
-    await interaction.deleteReply();
-  } catch {
-    // Ignore if already deleted
-  }
-
-  if (quickCreateWithTimer) {
-    await quickCreateWithTimer(interaction, regionId, timerMinutes, snapshotKey);
-  } else {
-    logger.error('quickCreateWithTimer function not set');
   }
 }
 

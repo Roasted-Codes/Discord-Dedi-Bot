@@ -32,8 +32,8 @@ export async function handleAutocomplete(interaction) {
       return await interaction.respond(cities);
     }
 
-    // Server autocomplete for /snapshot
-    if (interaction.commandName === 'snapshot' && focusedOption.name === 'server') {
+    // Server autocomplete for admin snapshot maintenance commands
+    if (['snapshot', 'snapshot-prep'].includes(interaction.commandName) && focusedOption.name === 'server') {
       if (!hasSnapshotPermission(interaction.user.id)) {
         return await interaction.respond([]);
       }

@@ -27,6 +27,10 @@ export const config = {
   },
   exclude: {
     instanceId: process.env.EXCLUDE_INSTANCE_ID,
+    instanceIds: [
+      process.env.EXCLUDE_INSTANCE_ID,
+      ...(process.env.EXCLUDE_INSTANCE_IDS || '').split(',')
+    ].map(id => String(id || '').trim()).filter(Boolean),
     snapshotId: process.env.EXCLUDE_SNAPSHOT_ID
   }
 };
