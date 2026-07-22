@@ -159,6 +159,9 @@ export async function removeSelkiesRoute({ instanceId, serverId } = {}) {
 }
 
 export async function reconcileSelkiesRoutes(instances = []) {
+  if (!instances.length) {
+    return { skipped: true, reason: 'empty_inventory' };
+  }
   if (!isCentralSelkiesEnabled()) {
     return { skipped: true };
   }

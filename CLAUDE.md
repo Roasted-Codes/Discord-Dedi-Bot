@@ -89,7 +89,6 @@ src/
 
 #### Discord Commands
 - `/list` - List all active game servers
-- `/status` - Check server status via dropdown selection
 - `/create` - Create new server with optional name and city selection (autocomplete)
 - `/start` - Start stopped servers via dropdown selection
 - `/stop` - Stop running servers via dropdown selection

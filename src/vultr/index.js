@@ -284,9 +284,9 @@ export async function waitForInstanceStatus(instanceId, targetPowerStatus, timeo
 /**
  * Start an instance
  */
-export async function startInstanceApi(instanceId) {
+export async function startInstanceApi(instanceId, timeout) {
   await vultr.instances.startInstance({ "instance-id": instanceId });
-  return await waitForInstanceStatus(instanceId, 'running');
+  return await waitForInstanceStatus(instanceId, 'running', timeout);
 }
 
 /**

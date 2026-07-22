@@ -24,6 +24,8 @@ import {
   updateXlinkAssignmentInstance
 } from '../../xlink/credentials.js';
 import { buildSelkiesAccess, buildSelkiesEnv } from '../../selkies/access.js';
+import { scheduleInteractionReplyCleanup } from '../../services/notifications.js';
+import { CREATE_REPLY_CLEANUP_MS } from '../../config/constants.js';
 
 // This will be set by the main entry point
 let startInstanceStatusPolling = null;
@@ -122,7 +124,10 @@ export const createCommand = {
       const xlink = await assignXlinkAccount({
         region: selectedCity,
         cityLabel,
-        creator: interaction.user.username
+        creator: interaction.user.username,
+        creatorId: interaction.user.id,
+        snapshotId: snapshotChoice.id,
+        snapshotLabel: snapshotChoice.label
       });
       const identity = createServerIdentity({
         serverId: xlink.assignment.server_id,
@@ -211,6 +216,9 @@ export const createCommand = {
       if (startInstanceStatusPolling) {
         startInstanceStatusPolling(instance.id, serverName, selectedCity, interaction, initialMessage);
       }
+      scheduleInteractionReplyCleanup(interaction, {
+        deleteAfterMs: CREATE_REPLY_CLEANUP_MS
+      });
 
     } catch (error) {
       logger.error('Create command failed:', error.message);

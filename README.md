@@ -73,7 +73,6 @@ Edit the `.env` file with your credentials:
 |---------|-------------|---------|
 | `/panel` | Show persistent control panel with quick-create buttons | None |
 | `/list` | List all active game servers | None |
-| `/status` | Check status of a server | Shows dropdown of available servers |
 | `/create` | Create a new server from snapshot | `name`, `city` (optional) |
 | `/start` | Start a stopped server | Shows dropdown of stopped servers |
 | `/stop` | Stop a running server | Shows dropdown of running servers |

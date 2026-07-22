@@ -12,18 +12,36 @@ import {
   TextInputStyle
 } from 'discord.js';
 import {
+  getInstance,
   listInstances,
-  rebootInstanceApi
+  rebootInstanceApi,
+  startInstanceApi
 } from '../../vultr/index.js';
 import { instanceState } from '../../state/instanceState.js';
 import { panelData } from '../../state/panelState.js';
-import { sendAutoCleanupFollowUp } from '../../services/notifications.js';
+import {
+  createPowerActionCoordinator,
+  formatPowerActionMessage
+} from '../../services/powerActions.js';
+import {
+  scheduleMessageCleanup,
+  sendAutoCleanupFollowUp
+} from '../../services/notifications.js';
 import { formatRemainingTime } from '../../utils/formatters.js';
-import { SELF_DESTRUCT_COIN_MINUTES } from '../../config/constants.js';
+import {
+  POWER_ACTION_REPLY_CLEANUP_MS,
+  SELF_DESTRUCT_COIN_MINUTES
+} from '../../config/constants.js';
 import { logger } from '../../utils/logger.js';
 
 // Will be set by main entry point
 let executeFromPanel = {};
+const POWER_ACTION_TIMEOUT_MS = 2 * 60 * 1000;
+const executePowerAction = createPowerActionCoordinator({
+  getInstance,
+  restartInstance: rebootInstanceApi,
+  startInstance: instanceId => startInstanceApi(instanceId, POWER_ACTION_TIMEOUT_MS)
+});
 const PANEL_BUTTON_IDS = new Set([
   'btn_create_modal',
   'btn_destroy',
@@ -214,13 +232,42 @@ export async function handleButton(interaction) {
   }
 }
 
-async function handleConfirmRestart(interaction, instanceId) {
+export async function handleConfirmRestart(
+  interaction,
+  instanceId,
+  powerAction = executePowerAction
+) {
+  scheduleMessageCleanup(interaction.message, {
+    deleteAfterMs: POWER_ACTION_REPLY_CLEANUP_MS
+  });
   try {
-    await rebootInstanceApi(instanceId);
-    // No message needed - panel will show status change
+    await interaction.editReply({
+      content: 'Checking the server and submitting the appropriate power action...',
+      components: []
+    });
+
+    const result = await powerAction(instanceId);
+
+    await interaction.editReply({
+      content: formatPowerActionMessage(result),
+      components: []
+    });
+    scheduleMessageCleanup(interaction.message);
+
+    if (executeFromPanel.refreshPanel) {
+      try {
+        await executeFromPanel.refreshPanel();
+      } catch (error) {
+        logger.warn('Panel refresh after power action failed:', error.message);
+      }
+    }
   } catch (error) {
     logger.error('Error restarting server:', error.message);
-    await sendAutoCleanupFollowUp(interaction, 'There was an error restarting the server.');
+    await interaction.editReply({
+      content: 'Vultr rejected the power request or could not be reached. No success was assumed.',
+      components: []
+    });
+    scheduleMessageCleanup(interaction.message);
   }
 }
 

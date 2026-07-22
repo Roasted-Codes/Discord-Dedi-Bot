@@ -28,6 +28,8 @@ export const MAX_DESTRUCTION_WAIT_MS = 15 * 60 * 1000; // 15 minutes
 
 // Auto-cleanup message timeout
 export const AUTO_CLEANUP_DEFAULT_MS = 30000;
+export const CREATE_REPLY_CLEANUP_MS = 10 * 60 * 1000;
+export const POWER_ACTION_REPLY_CLEANUP_MS = 3 * 60 * 1000;
 
 // Vultr defaults
 export const DEFAULT_REGION = process.env.VULTR_REGION || 'dfw';

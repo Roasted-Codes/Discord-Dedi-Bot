@@ -16,9 +16,13 @@ import {
 } from '../../vultr/index.js';
 import { instanceState } from '../../state/instanceState.js';
 import { formatRemainingTime } from '../../utils/formatters.js';
-import { SELF_DESTRUCT_COIN_MINUTES } from '../../config/constants.js';
+import {
+  POWER_ACTION_REPLY_CLEANUP_MS,
+  SELF_DESTRUCT_COIN_MINUTES
+} from '../../config/constants.js';
 import { logger } from '../../utils/logger.js';
 import { releaseXlinkAssignment } from '../../xlink/credentials.js';
+import { scheduleMessageCleanup } from '../../services/notifications.js';
 
 // Will be set by main entry point
 let startInstanceDestructionPolling = null;
@@ -115,6 +119,9 @@ async function handleRestoreSnapshotSelect(interaction) {
 }
 
 async function handleRestartServer(interaction) {
+  scheduleMessageCleanup(interaction.message, {
+    deleteAfterMs: POWER_ACTION_REPLY_CLEANUP_MS
+  });
   try {
     await interaction.deferUpdate();
   } catch (e) {

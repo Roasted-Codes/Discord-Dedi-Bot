@@ -11,6 +11,36 @@ import { logger } from '../utils/logger.js';
 const DEFAULT_SELKIES_DIRECT_URL_TEMPLATE = 'https://{ipDash}.sslip.io';
 const DEFAULT_SELKIES_CENTRAL_URL_TEMPLATE = 'https://{serverHost}.dedi.halo2stats.org';
 const DEFAULT_XLINK_URL_TEMPLATE = 'http://{ip}:34522';
+const messageCleanupTimers = new Map();
+
+export function scheduleMessageCleanup(
+  message,
+  {
+    deleteAfterMs = AUTO_CLEANUP_DEFAULT_MS,
+    setTimeoutFn = setTimeout,
+    clearTimeoutFn = clearTimeout
+  } = {}
+) {
+  if (!message || typeof message.delete !== 'function') return null;
+
+  const key = message.id || message;
+  const previousTimer = messageCleanupTimers.get(key);
+  if (previousTimer) clearTimeoutFn(previousTimer);
+
+  let timer;
+  timer = setTimeoutFn(async () => {
+    if (messageCleanupTimers.get(key) === timer) {
+      messageCleanupTimers.delete(key);
+    }
+    try {
+      await message.delete();
+    } catch (error) {
+      // Message may already be deleted.
+    }
+  }, deleteAfterMs);
+  messageCleanupTimers.set(key, timer);
+  return timer;
+}
 
 function dnsSafeLabel(value) {
   return String(value || '')
@@ -98,14 +128,7 @@ export async function sendAutoCleanupFollowUp(
 
     const followUp = await interaction.followUp(options);
 
-    // Schedule deletion
-    setTimeout(async () => {
-      try {
-        await followUp.delete();
-      } catch (error) {
-        // Message may already be deleted
-      }
-    }, deleteAfterMs);
+    scheduleMessageCleanup(followUp, { deleteAfterMs });
 
     return followUp;
   } catch (error) {
@@ -115,6 +138,24 @@ export async function sendAutoCleanupFollowUp(
     }
     throw error;
   }
+}
+
+/**
+ * Delete the original interaction reply after a bounded delay.
+ */
+export function scheduleInteractionReplyCleanup(
+  interaction,
+  { deleteAfterMs = AUTO_CLEANUP_DEFAULT_MS, setTimeoutFn = setTimeout } = {}
+) {
+  return setTimeoutFn(async () => {
+    try {
+      await interaction.deleteReply();
+    } catch (error) {
+      if (![10008, 10062, 50027].includes(error.code)) {
+        logger.debug('Failed to delete interaction reply:', error.message);
+      }
+    }
+  }, deleteAfterMs);
 }
 
 /**

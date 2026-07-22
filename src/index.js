@@ -74,10 +74,12 @@ import {
 import {
   assignXlinkAccount,
   buildXlinkEnv,
+  getXlinkAssignmentByInstanceId,
   releaseXlinkAssignment,
   syncXlinkAssignmentsWithInstances,
   updateXlinkAssignmentInstance
 } from './xlink/credentials.js';
+import { buildRecoveredInstanceMetadata } from './services/instanceProvenance.js';
 import { buildSelkiesAccess, buildSelkiesEnv } from './selkies/access.js';
 import {
   reconcileSelkiesRoutes,
@@ -356,7 +358,7 @@ async function startInstanceStatusPolling(instanceId, serverName, region, intera
     if (Date.now() - startTime > maxWaitTime) {
       await sendAutoCleanupFollowUp(interaction,
         `Server "${serverName}" exceeded 30-minute startup limit.\n` +
-        `Use \`/status\` to check manually.`
+        `Check the latest ServerBot panel for its current state.`
       );
       return;
     }
@@ -1177,7 +1179,10 @@ async function executeManualRestoreFromSnapshot(interaction, {
     xlink = await assignXlinkAccount({
       region: regionId,
       cityLabel: cityName,
-      creator: interaction.user.username
+      creator: interaction.user.username,
+      creatorId: interaction.user.id,
+      snapshotId: snapshot.id,
+      snapshotLabel
     });
     identity = createServerIdentity({
       serverId: xlink.assignment.server_id,
@@ -1289,7 +1294,10 @@ async function executeQuickCreateWithTimer(
     xlink = await assignXlinkAccount({
       region: regionId,
       cityLabel: cityName,
-      creator: interaction.user.username
+      creator: interaction.user.username,
+      creatorId: interaction.user.id,
+      snapshotId: snapshotChoice.id,
+      snapshotLabel: snapshotChoice.label
     });
     identity = createServerIdentity({
       serverId: xlink.assignment.server_id,
@@ -1489,6 +1497,7 @@ setModalManualRestoreFunction(executeManualRestoreConfirmation);
 setPanelExecutors({
   destroy: executeDestroyFromPanel,
   restart: executeRestartFromPanel,
+  refreshPanel: updatePanel,
   manualRestore: executeManualRestoreFromPanel,
   restoreSnapshotPage: executeRestoreSnapshotPage,
   advancedManualRestore: executeAdvancedManualRestore,
@@ -1508,32 +1517,54 @@ client.once('ready', async () => {
   try {
     const testResponse = await vultr.instances.listInstances();
     logger.info('Vultr API connected');
-    await syncXlinkAssignmentsWithInstances(testResponse.instances || []);
+    const providerInstances = testResponse.instances || [];
+    if (providerInstances.length > 0) {
+      await syncXlinkAssignmentsWithInstances(providerInstances);
+    } else {
+      logger.warn('Skipping XLink assignment pruning because provider inventory was empty.');
+    }
     try {
-      await reconcileSelkiesRoutes(testResponse.instances || []);
+      await reconcileSelkiesRoutes(providerInstances);
     } catch (error) {
       logger.warn(`Selkies route reconciliation failed: ${error.message}`);
     }
 
     // Recover existing instances
     if (testResponse.instances) {
+      let providerSnapshots = [];
+      try {
+        providerSnapshots = await getSnapshots();
+      } catch (error) {
+        logger.warn(`Snapshot label recovery failed: ${error.message}`);
+      }
+      const providerSnapshotsById = new Map(
+        providerSnapshots.map(snapshot => [snapshot.id, snapshot])
+      );
       let recoveredCount = 0;
       for (const instance of testResponse.instances) {
         if (await isCurrentServer(instance.id)) continue;
         const snapshotChoice = getDediSnapshotChoiceById(instance.snapshot_id);
+        const assignment = getXlinkAssignmentByInstanceId(instance.id, instance.label);
+        const recovered = buildRecoveredInstanceMetadata({
+          instance,
+          assignment,
+          configuredSnapshot: snapshotChoice,
+          providerSnapshot: providerSnapshotsById.get(instance.snapshot_id)
+        });
 
         instanceState.trackInstance(
           instance.id,
-          'unknown',
-          'System Recovery',
+          recovered.userId,
+          recovered.creatorName,
           instance.power_status,
           {
             ip: instance.main_ip,
             name: instance.label || 'Recovered Server',
             region: instance.region,
-            snapshotKey: snapshotChoice?.key,
-            snapshotId: snapshotChoice?.id,
-            snapshotLabel: snapshotChoice?.label
+            createdAt: recovered.createdAt,
+            snapshotKey: recovered.snapshotKey,
+            snapshotId: recovered.snapshotId,
+            snapshotLabel: recovered.snapshotLabel
           }
         );
         recoveredCount++;

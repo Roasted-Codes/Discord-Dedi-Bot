@@ -21,7 +21,11 @@ export async function handleCommand(interaction, client) {
   // Defer reply immediately to get 15-minute response window
   try {
     if (!interaction.deferred && !interaction.replied) {
-      await interaction.deferReply();
+      await interaction.deferReply(
+        interaction.commandName === 'create'
+          ? { flags: MessageFlags.Ephemeral }
+          : undefined
+      );
     }
   } catch (error) {
     if (error.code === 10062) {

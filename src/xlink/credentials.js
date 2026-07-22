@@ -42,6 +42,9 @@ function normalizeAssignment(assignment) {
     region: assignment.region || null,
     city_label: assignment.city_label || null,
     creator: assignment.creator || null,
+    creator_id: assignment.creator_id || null,
+    snapshot_id: assignment.snapshot_id || null,
+    snapshot_label: assignment.snapshot_label || null,
     assigned_at: assignment.assigned_at || new Date().toISOString()
   };
 }
@@ -135,6 +138,9 @@ export async function assignXlinkAccount({
   region,
   cityLabel,
   creator,
+  creatorId,
+  snapshotId,
+  snapshotLabel,
   random = Math.random
 }) {
   return withAssignmentLock(async () => {
@@ -155,6 +161,9 @@ export async function assignXlinkAccount({
       region,
       city_label: cityLabel,
       creator,
+      creator_id: creatorId,
+      snapshot_id: snapshotId,
+      snapshot_label: snapshotLabel,
       assigned_at: new Date().toISOString()
     });
 
@@ -171,6 +180,13 @@ export async function assignXlinkAccount({
       }
     };
   });
+}
+
+export function getXlinkAssignmentByInstanceId(vultrInstanceId, serverId = null) {
+  return loadAssignments().find(assignment =>
+    assignment.vultr_instance_id === vultrInstanceId ||
+    (!assignment.vultr_instance_id && serverId && assignment.server_id === serverId)
+  ) || null;
 }
 
 export async function updateXlinkAssignmentInstance(serverId, vultrInstanceId) {
