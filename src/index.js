@@ -13,7 +13,6 @@ import {
 import {
   createDiscordClient,
   REST,
-  Routes,
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
@@ -28,6 +27,7 @@ import { fileURLToPath } from 'url';
 import path from 'path';
 import { randomUUID } from 'crypto';
 import { commands, registerCommands } from './discord/commands/index.js';
+import { registerApplicationCommands } from './discord/registerApplicationCommands.js';
 import {
   setupHandlers,
   setDestructionPollingFunction,
@@ -1552,18 +1552,14 @@ client.once('ready', async () => {
     const rest = new REST({ version: '10' }).setToken(config.discord.token);
 
     logger.info(`Registering ${commandData.length} commands...`);
-    await rest.put(Routes.applicationCommands(client.user.id), { body: commandData });
+    const commandScope = await registerApplicationCommands({
+      rest,
+      applicationId: client.user.id,
+      guildId: config.discord.guildId,
+      commands: commandData
+    });
 
-    // Clear guild-specific commands (were causing duplicates)
-    if (config.discord.guildId) {
-      await rest.put(
-        Routes.applicationGuildCommands(client.user.id, config.discord.guildId),
-        { body: [] }
-      );
-      logger.debug(`Cleared guild commands`);
-    }
-
-    logger.info('Commands registered');
+    logger.info(`Commands registered (${commandScope})`);
   } catch (error) {
     logger.error('Command registration failed:', error.message);
   }
