@@ -32,6 +32,7 @@ import { registerApplicationCommands } from './discord/registerApplicationComman
 import {
   setupHandlers,
   setDestructionPollingFunction,
+  setServerLockPanelFunction,
   setPanelExecutors,
   setModalPanelFunction,
   setModalManualRestoreFunction
@@ -87,6 +88,24 @@ import {
   removeSelkiesRoute,
   upsertSelkiesRoute
 } from './selkies/routes.js';
+import {
+  isAuthoritativeInstanceAbsence,
+  isServerLocked,
+  reconcileServerLocks,
+  runIfServerUnlocked,
+  unlockServer
+} from './services/serverLocks.js';
+import {
+  shouldInitializeSelfDestructTimer,
+  submitSelfDestructDeletion,
+  submitUnlockedDeletion
+} from './services/serverDeletionGuard.js';
+import {
+  buildDestroyOption,
+  formatServerPanelHeading,
+  formatServerProtectionLine
+} from './services/serverLockPresentation.js';
+import { listCompleteInstanceInventory } from './services/vultrInventory.js';
 
 // Create Discord client
 const client = createDiscordClient();
@@ -103,7 +122,8 @@ const PANEL_BUTTON_IDS = new Set([
   'btn_destroy',
   'btn_restart',
   'btn_insert_coin',
-  'btn_restore_snapshot'
+  'btn_restore_snapshot',
+  'btn_server_locks'
 ]);
 
 function isPanelButtonId(customId) {
@@ -319,7 +339,10 @@ async function initializeSelfDestructTimer(instanceId) {
   const trackedInstance = instanceState.getInstance(instanceId);
   if (!trackedInstance) return;
 
-  if (trackedInstance.selfDestructTimer) return;
+  if (!shouldInitializeSelfDestructTimer({
+    tracked: trackedInstance,
+    isLocked: isServerLocked
+  })) return;
 
   // Use custom timer if set, otherwise use default
   const timerMinutes = trackedInstance.timerMinutes ?? SELF_DESTRUCT_INITIAL_MINUTES;
@@ -518,7 +541,15 @@ async function startInstanceDestructionPolling(instanceId, serverName, cost, int
       }
 
       try {
-        await vultr.instances.deleteInstance({ "instance-id": instanceId });
+        const deletion = await submitUnlockedDeletion({
+          instanceId,
+          isLocked: isServerLocked,
+          deleteInstance: id => vultr.instances.deleteInstance({ "instance-id": id }),
+          runUnlocked: runIfServerUnlocked
+        });
+        if (deletion.locked) {
+          logger.warn(`Skipped repeated deletion for locked instance ${instanceId.slice(0, 8)}...`);
+        }
       } catch (e) {
         // May fail if server still booting
       }
@@ -527,10 +558,11 @@ async function startInstanceDestructionPolling(instanceId, serverName, cost, int
       setTimeout(pollStatus, 10000);
 
     } catch (error) {
-      if (error.response?.status === 404 || error.response?.status === 403) {
+      if (isAuthoritativeInstanceAbsence(error)) {
         instanceState.updateInstance(instanceId, 'destroyed', { selfDestructTimer: null });
         await removeSelkiesRoute({ instanceId });
         await releaseXlinkAssignment({ vultrInstanceId: instanceId });
+        await unlockServer(instanceId);
         try {
           await sendServerDestructionDM(interaction.user, serverName, cost);
         } catch (e) {
@@ -580,6 +612,11 @@ async function generatePanelComponents(showQuickActions = true) {
       new ButtonBuilder()
         .setCustomId('btn_restore_snapshot')
         .setLabel('Restore Snapshot')
+        .setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId('btn_server_locks')
+        .setLabel('Server Locks')
+        .setEmoji('🔒')
         .setStyle(ButtonStyle.Secondary)
     );
 
@@ -641,8 +678,15 @@ async function formatServersForPanel(guild) {
       // Show status text for non-running servers
       const isCreating = instance.status === 'pending' || instance.power_status === 'stopped' && !instance.main_ip;
       const statusText = isCreating ? ' *(Creating...)*' : '';
+      const locked = isServerLocked(instance.id);
 
-      content += `${status.emoji} **${serverName}**${statusText}\n`;
+      content += formatServerPanelHeading({
+        statusEmoji: status.emoji,
+        serverName,
+        statusText,
+        locked
+      });
+      content += formatServerProtectionLine(locked);
 
       if (instance.main_ip && instance.main_ip !== '0.0.0.0') {
         const linkDetails = {
@@ -879,11 +923,9 @@ async function executeDestroyFromPanel(interaction) {
     return sendAutoCleanupFollowUp(interaction, 'No active servers found.');
   }
 
-  const options = activeInstances.map(instance => ({
-    label: instance.label || 'Unnamed Server',
-    description: `Status: ${instance.power_status} | ${instance.region}`,
-    value: instance.id
-  }));
+  const options = activeInstances.slice(0, 25).map(instance =>
+    buildDestroyOption(instance, isServerLocked(instance.id))
+  );
 
   const row = new ActionRowBuilder()
     .addComponents(
@@ -1403,7 +1445,22 @@ function startSelfDestructPolling() {
           logger.info(`Timer expired for "${tracked.name}" - destroying`);
 
           try {
-            await vultr.instances.deleteInstance({ "instance-id": tracked.id });
+            const deletion = await submitSelfDestructDeletion({
+              tracked,
+              isLocked: isServerLocked,
+              deleteInstance: id => vultr.instances.deleteInstance({ "instance-id": id }),
+              runUnlocked: runIfServerUnlocked,
+              state: instanceState
+            });
+            if (deletion.locked) {
+              logger.warn(`Cancelled self-destruct timer for locked instance ${tracked.id.slice(0, 8)}...`);
+              setTimeout(() => updatePanel(), 2000);
+              continue;
+            }
+            if (!deletion.submitted) {
+              logger.debug(`Self-destruct deletion already in progress for ${tracked.id.slice(0, 8)}...`);
+              continue;
+            }
             instanceState.updateInstance(tracked.id, 'destroyed', { selfDestructTimer: null });
             await removeSelkiesRoute({
               instanceId: tracked.id,
@@ -1493,6 +1550,7 @@ setPollingFunction(startInstanceStatusPolling);
 setSnapshotPollingFunction(startSnapshotStatusPolling);
 setPanelFunction(updatePanel);
 setDestructionPollingFunction(startInstanceDestructionPolling);
+setServerLockPanelFunction(updatePanel);
 setModalPanelFunction(updatePanel);
 setModalManualRestoreFunction(executeManualRestoreConfirmation);
 setPanelExecutors({
@@ -1516,9 +1574,31 @@ client.once(Events.ClientReady, async () => {
 
   // Test Vultr API
   try {
-    const testResponse = await vultr.instances.listInstances();
+    const providerInstances = await listCompleteInstanceInventory(
+      params => vultr.instances.listInstances(params)
+    );
     logger.info('Vultr API connected');
-    const providerInstances = testResponse.instances || [];
+    try {
+      const lockReconciliation = await reconcileServerLocks(
+        providerInstances,
+        async instanceId => {
+          try {
+            await vultr.instances.getInstance({ 'instance-id': instanceId });
+            return false;
+          } catch (error) {
+            if (isAuthoritativeInstanceAbsence(error)) return true;
+            throw error;
+          }
+        }
+      );
+      if (lockReconciliation.skipped) {
+        logger.warn('Skipping server-lock pruning because provider inventory was empty.');
+      } else if (lockReconciliation.removedInstanceIds.length > 0) {
+        logger.info(`Removed ${lockReconciliation.removedInstanceIds.length} stale server lock(s)`);
+      }
+    } catch (error) {
+      logger.warn(`Server-lock reconciliation failed; existing locks were preserved: ${error.message}`);
+    }
     if (providerInstances.length > 0) {
       await syncXlinkAssignmentsWithInstances(providerInstances);
     } else {
@@ -1531,7 +1611,7 @@ client.once(Events.ClientReady, async () => {
     }
 
     // Recover existing instances
-    if (testResponse.instances) {
+    if (providerInstances) {
       let providerSnapshots = [];
       try {
         providerSnapshots = await getSnapshots();
@@ -1542,7 +1622,7 @@ client.once(Events.ClientReady, async () => {
         providerSnapshots.map(snapshot => [snapshot.id, snapshot])
       );
       let recoveredCount = 0;
-      for (const instance of testResponse.instances) {
+      for (const instance of providerInstances) {
         if (await isCurrentServer(instance.id)) continue;
         const snapshotChoice = getDediSnapshotChoiceById(instance.snapshot_id);
         const assignment = getXlinkAssignmentByInstanceId(instance.id, instance.label);

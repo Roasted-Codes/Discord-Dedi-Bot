@@ -6,6 +6,8 @@
 
 import {
   ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
   StringSelectMenuBuilder,
   ModalBuilder,
   TextInputBuilder,
@@ -13,9 +15,11 @@ import {
 } from 'discord.js';
 import {
   getInstance,
+  listCompleteInstances,
   listInstances,
   rebootInstanceApi,
-  startInstanceApi
+  startInstanceApi,
+  hasSnapshotPermission
 } from '../../vultr/index.js';
 import { instanceState } from '../../state/instanceState.js';
 import { panelData } from '../../state/panelState.js';
@@ -33,6 +37,8 @@ import {
   SELF_DESTRUCT_COIN_MINUTES
 } from '../../config/constants.js';
 import { logger } from '../../utils/logger.js';
+import { isServerLocked } from '../../services/serverLocks.js';
+import { buildServerLockOption } from '../../services/serverLockPresentation.js';
 
 // Will be set by main entry point
 let executeFromPanel = {};
@@ -47,11 +53,135 @@ const PANEL_BUTTON_IDS = new Set([
   'btn_destroy',
   'btn_restart',
   'btn_insert_coin',
-  'btn_restore_snapshot'
+  'btn_restore_snapshot',
+  'btn_server_locks'
 ]);
+const SERVER_LOCK_PAGE_SIZE = 25;
+
+function buildServerLocksPage(instances, requestedPage, isLocked) {
+  const pageCount = Math.ceil(instances.length / SERVER_LOCK_PAGE_SIZE);
+  const page = Math.min(Math.max(0, requestedPage), pageCount - 1);
+  const displayedInstances = instances.slice(
+    page * SERVER_LOCK_PAGE_SIZE,
+    (page + 1) * SERVER_LOCK_PAGE_SIZE
+  );
+  const components = [
+    new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder()
+        .setCustomId('server_lock_toggle')
+        .setPlaceholder('Select a server to lock or unlock')
+        .addOptions(displayedInstances.map(instance =>
+          buildServerLockOption(instance, isLocked(instance.id))
+        ))
+    )
+  ];
+
+  if (pageCount > 1) {
+    const navigation = [];
+    if (page > 0) {
+      navigation.push(
+        new ButtonBuilder()
+          .setCustomId(`server_locks_page_${page - 1}`)
+          .setLabel('Previous')
+          .setStyle(ButtonStyle.Secondary)
+      );
+    }
+    if (page < pageCount - 1) {
+      navigation.push(
+        new ButtonBuilder()
+          .setCustomId(`server_locks_page_${page + 1}`)
+          .setLabel('Next')
+          .setStyle(ButtonStyle.Secondary)
+      );
+    }
+    components.push(new ActionRowBuilder().addComponents(navigation));
+  }
+
+  return {
+    content: `**Server Locks**\n\nSelect a server to change persistent deletion protection. Page ${page + 1} of ${pageCount}.`,
+    components
+  };
+}
 
 export function setPanelExecutors(executors) {
   executeFromPanel = executors;
+}
+
+export async function handleServerLocksButton(interaction, {
+  isAdmin = hasSnapshotPermission,
+  list = listCompleteInstances,
+  isLocked = isServerLocked
+} = {}) {
+  if (!isAdmin(interaction.user.id)) {
+    return interaction.reply({
+      content: 'Only ServerBot administrators can manage server locks.',
+      ephemeral: true
+    });
+  }
+
+  let acknowledged = false;
+  try {
+    await interaction.deferReply({ ephemeral: true });
+    acknowledged = true;
+
+    const instances = (await list()).filter(instance =>
+      instance.status !== 'destroyed' && instance.power_status !== 'destroyed'
+    );
+
+    if (!instances.length) {
+      return interaction.editReply({
+        content: 'No active servers are available to lock.'
+      });
+    }
+
+    return interaction.editReply(buildServerLocksPage(instances, 0, isLocked));
+  } catch (error) {
+    if (error.code === 10062) return;
+    logger.error('Error opening server lock controls:', error.message);
+    const payload = { content: 'Server lock controls are temporarily unavailable.', components: [] };
+    if (acknowledged || interaction.deferred || interaction.replied) {
+      return interaction.editReply(payload);
+    }
+    return interaction.reply({ ...payload, ephemeral: true });
+  }
+}
+
+export async function handleServerLocksPageButton(interaction, page, {
+  isAdmin = hasSnapshotPermission,
+  list = listCompleteInstances,
+  isLocked = isServerLocked
+} = {}) {
+  if (!isAdmin(interaction.user.id)) {
+    return interaction.reply({
+      content: 'Only ServerBot administrators can manage server locks.',
+      ephemeral: true
+    });
+  }
+
+  let acknowledged = false;
+  try {
+    await interaction.deferUpdate();
+    acknowledged = true;
+    const instances = (await list()).filter(instance =>
+      instance.status !== 'destroyed' && instance.power_status !== 'destroyed'
+    );
+    if (!instances.length) {
+      return interaction.editReply({
+        content: 'No active servers are available to lock.',
+        components: []
+      });
+    }
+
+    return interaction.editReply(buildServerLocksPage(instances, page, isLocked));
+  } catch (error) {
+    if (error.code === 10062) return;
+    logger.error('Error changing server lock page:', error.message);
+    const payload = { content: 'Server lock controls are temporarily unavailable.', components: [] };
+    if (acknowledged || interaction.deferred || interaction.replied) {
+      return interaction.editReply(payload);
+    }
+    return interaction.reply({ ...payload, ephemeral: true });
+  }
 }
 
 function isPanelButton(customId) {
@@ -79,6 +209,12 @@ export async function handleButton(interaction) {
   ) {
     logger.warn(`Rejected stale panel button ${interaction.customId} from message ${interaction.message?.id}`);
     await rejectStalePanelInteraction(interaction);
+    return;
+  }
+
+  if (interaction.customId.startsWith('server_locks_page_')) {
+    const page = Number.parseInt(interaction.customId.replace('server_locks_page_', ''), 10);
+    await handleServerLocksPageButton(interaction, Number.isNaN(page) ? 0 : page);
     return;
   }
 
@@ -128,6 +264,11 @@ export async function handleButton(interaction) {
     } else {
       await interaction.reply({ content: 'Manual restore is not available.', ephemeral: true });
     }
+    return;
+  }
+
+  if (interaction.customId === 'btn_server_locks') {
+    await handleServerLocksButton(interaction);
     return;
   }
 

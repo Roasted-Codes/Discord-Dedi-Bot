@@ -23,12 +23,23 @@ import {
 import { logger } from '../../utils/logger.js';
 import { releaseXlinkAssignment } from '../../xlink/credentials.js';
 import { scheduleMessageCleanup } from '../../services/notifications.js';
+import {
+  isServerLocked,
+  runIfServerUnlocked,
+  setServerLockState
+} from '../../services/serverLocks.js';
+import { submitUnlockedDeletion } from '../../services/serverDeletionGuard.js';
 
 // Will be set by main entry point
 let startInstanceDestructionPolling = null;
+let serverLockPanelRefresh = null;
 
 export function setDestructionPollingFunction(fn) {
   startInstanceDestructionPolling = fn;
+}
+
+export function setServerLockPanelFunction(fn) {
+  serverLockPanelRefresh = fn;
 }
 
 export async function handleSelectMenu(interaction) {
@@ -45,8 +56,117 @@ export async function handleSelectMenu(interaction) {
     case 'restore_snapshot_select':
       await handleRestoreSnapshotSelect(interaction);
       break;
+    case 'server_lock_toggle':
+      await handleServerLockToggle(interaction);
+      break;
     default:
       logger.warn(`Unknown select menu: ${interaction.customId}`);
+  }
+}
+
+export async function handleServerLockToggle(interaction, {
+  isAdmin = hasSnapshotPermission,
+  fetchInstance = getInstance,
+  setLockState = setServerLockState,
+  state = instanceState,
+  refreshPanel = serverLockPanelRefresh
+} = {}) {
+  if (!isAdmin(interaction.user.id)) {
+    return interaction.reply({
+      content: 'Only ServerBot administrators can manage server locks.',
+      ephemeral: true
+    });
+  }
+
+  try {
+    await interaction.deferUpdate();
+  } catch (error) {
+    if (error.code === 10062) return;
+    throw error;
+  }
+
+  const selectedValue = interaction.values?.[0] || '';
+  const separator = selectedValue.indexOf(':');
+  const desiredAction = separator > 0 ? selectedValue.slice(0, separator) : '';
+  const instanceId = separator > 0 ? selectedValue.slice(separator + 1) : '';
+  if (!instanceId || !['lock', 'unlock'].includes(desiredAction)) {
+    return interaction.editReply({
+      content: 'This server lock option is invalid or expired. Open Server Locks again.',
+      components: []
+    });
+  }
+
+  let instance;
+  try {
+    instance = await fetchInstance(instanceId);
+    if (!instance) {
+      return interaction.editReply({
+        content: 'This server is no longer available for lock management.',
+        components: []
+      });
+    }
+
+  } catch (error) {
+    logger.error('Error loading server for lock change:', error.message);
+    return interaction.editReply({
+      content: 'The server lock could not be changed. No success was assumed.',
+      components: []
+    });
+  }
+
+  const serverName = instance.label || 'Unnamed Server';
+  let alreadyDesired;
+
+  try {
+    const result = await setLockState({
+      instanceId,
+      locked: desiredAction === 'lock',
+      serverLabel: serverName,
+      lockedBy: interaction.user.id
+    });
+    alreadyDesired = !result.changed;
+  } catch (error) {
+    logger.error('Error persisting server lock change:', error.message);
+    return interaction.editReply({
+      content: 'The server lock could not be changed. No success was assumed.',
+      components: []
+    });
+  }
+
+  let timerCancelled = false;
+  let timerCleanupDeferred = false;
+  if (desiredAction === 'lock') {
+    try {
+      const tracked = state.getInstance(instanceId);
+      if (tracked?.selfDestructTimer) {
+        state.updateInstance(instanceId, tracked.status, { selfDestructTimer: null });
+        timerCancelled = true;
+      }
+    } catch (error) {
+      timerCleanupDeferred = true;
+      logger.warn('Server lock persisted but timer cancellation failed:', error.message);
+    }
+  }
+
+  const content = desiredAction === 'unlock'
+    ? `🔓 **${serverName}** is ${alreadyDesired ? 'already ' : ''}unlocked. ServerBot deletion is available again.`
+    : `🔒 **${serverName}** is ${alreadyDesired ? 'already ' : ''}locked. ServerBot deletion is blocked.` +
+      (timerCancelled ? ' Its self-destruct timer was cancelled.' : '') +
+      (timerCleanupDeferred ? ' Its deletion remains blocked while timer cleanup is deferred.' : '');
+
+  try {
+    await interaction.editReply({ content, components: [] });
+  } catch (error) {
+    logger.warn('Server lock changed but Discord response update failed:', error.message);
+    return;
+  }
+
+  if (refreshPanel) {
+    try {
+      await refreshPanel();
+    } catch (error) {
+      logger.warn('Panel refresh after server lock change failed:', error.message);
+    }
   }
 }
 
@@ -167,7 +287,18 @@ async function handleRestartServer(interaction) {
   }
 }
 
-async function handleDestroyServer(interaction) {
+export async function handleDestroyServer(interaction, {
+  checkCurrent = isCurrentServer,
+  fetchInstance = getInstance,
+  calculateCost = calculateInstanceCost,
+  isLocked = isServerLocked,
+  deleteInstance = instanceId => vultr.instances.deleteInstance({ "instance-id": instanceId }),
+  submitDeletion = submitUnlockedDeletion,
+  runUnlocked = runIfServerUnlocked,
+  state = instanceState,
+  beginDestructionPolling = startInstanceDestructionPolling,
+  releaseAssignment = releaseXlinkAssignment
+} = {}) {
   try {
     if (!interaction.deferred && !interaction.replied) {
       await interaction.deferUpdate();
@@ -180,7 +311,7 @@ async function handleDestroyServer(interaction) {
   const destroyId = interaction.values[0];
 
   try {
-    const isCurrent = await isCurrentServer(destroyId);
+    const isCurrent = await checkCurrent(destroyId);
     if (isCurrent) {
       return interaction.editReply({
         content: 'Cannot destroy bot server - self-protection enabled.',
@@ -188,7 +319,7 @@ async function handleDestroyServer(interaction) {
       });
     }
 
-    const instance = await getInstance(destroyId);
+    const instance = await fetchInstance(destroyId);
     if (!instance) {
       return interaction.editReply({
         content: 'This server is not available for management.',
@@ -197,9 +328,48 @@ async function handleDestroyServer(interaction) {
     }
 
     const serverName = instance.label || 'Unnamed Server';
-    const formattedCost = await calculateInstanceCost(instance);
+    const lockedMessage = {
+      content: `🔒 **${serverName}** is locked by an administrator and cannot be destroyed. Ask an administrator to unlock it first.`,
+      components: []
+    };
+    if (isLocked(destroyId)) {
+      return interaction.editReply(lockedMessage);
+    }
 
-    // Clear the select menu immediately - panel will show updates
+    const formattedCost = await calculateCost(instance);
+
+    await interaction.editReply({
+      content: `Submitting destruction request for **${serverName}**...`,
+      components: []
+    });
+
+    let deletion;
+    try {
+      deletion = await submitDeletion({
+        instanceId: destroyId,
+        isLocked,
+        deleteInstance,
+        runUnlocked
+      });
+    } catch (deleteError) {
+      const errorMsg = deleteError.response?.status === 400
+        ? `Cannot destroy "${serverName}" - Vultr preventing deletion. Try again in a few minutes.`
+        : `Error destroying "${serverName}": ${deleteError.message}`;
+
+      return interaction.editReply({ content: errorMsg, components: [] });
+    }
+
+    if (deletion.locked) {
+      return interaction.editReply(lockedMessage);
+    }
+    if (!deletion.submitted) {
+      return interaction.editReply({
+        content: `A destruction request for **${serverName}** is already in progress.`,
+        components: []
+      });
+    }
+
+    // Clear the select menu only after the guarded provider call was accepted.
     try {
       await interaction.deleteReply();
     } catch {
@@ -207,29 +377,25 @@ async function handleDestroyServer(interaction) {
     }
 
     try {
-      await vultr.instances.deleteInstance({ "instance-id": destroyId });
-
-      const trackedInstance = instanceState.getInstance(destroyId);
+      const trackedInstance = state.getInstance(destroyId);
       if (trackedInstance?.selfDestructTimer) {
-        instanceState.updateInstance(destroyId, trackedInstance.status, {
+        state.updateInstance(destroyId, trackedInstance.status, {
           selfDestructTimer: null
         });
       }
+    } catch (cleanupError) {
+      logger.error(`Deletion accepted but timer cleanup failed for ${destroyId}:`, cleanupError.message);
+    }
 
-      if (startInstanceDestructionPolling) {
-        startInstanceDestructionPolling(destroyId, serverName, formattedCost, interaction);
+    try {
+      if (beginDestructionPolling) {
+        await beginDestructionPolling(destroyId, serverName, formattedCost, interaction);
       } else {
-        instanceState.updateInstance(destroyId, 'destroyed');
-        await releaseXlinkAssignment({ vultrInstanceId: destroyId });
+        state.updateInstance(destroyId, 'destroyed');
+        await releaseAssignment({ vultrInstanceId: destroyId });
       }
-
-    } catch (deleteError) {
-      // Show errors as ephemeral followup since original reply was deleted
-      const errorMsg = deleteError.response?.status === 400
-        ? `Cannot destroy "${serverName}" - Vultr preventing deletion. Try again in a few minutes.`
-        : `Error destroying "${serverName}": ${deleteError.message}`;
-
-      await interaction.followUp({ content: errorMsg, ephemeral: true });
+    } catch (cleanupError) {
+      logger.error(`Deletion accepted but post-deletion cleanup failed for ${destroyId}:`, cleanupError.message);
     }
   } catch (error) {
     logger.error('Error destroying server:', error.message);

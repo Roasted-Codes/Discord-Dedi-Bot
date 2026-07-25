@@ -7,6 +7,8 @@
 import { SlashCommandBuilder, ActionRowBuilder, StringSelectMenuBuilder } from 'discord.js';
 import { listInstances } from '../../vultr/index.js';
 import { logger } from '../../utils/logger.js';
+import { isServerLocked } from '../../services/serverLocks.js';
+import { buildDestroyOption } from '../../services/serverLockPresentation.js';
 
 export const destroyCommand = {
   data: new SlashCommandBuilder()
@@ -24,11 +26,9 @@ export const destroyCommand = {
         return interaction.editReply('No active servers found to destroy.');
       }
 
-      const options = activeInstances.map(instance => ({
-        label: instance.label || 'Unnamed Server',
-        description: `Status: ${instance.power_status} | IP: ${instance.main_ip} | Region: ${instance.region}`,
-        value: instance.id
-      }));
+      const options = activeInstances.slice(0, 25).map(instance =>
+        buildDestroyOption(instance, isServerLocked(instance.id))
+      );
 
       const row = new ActionRowBuilder()
         .addComponents(

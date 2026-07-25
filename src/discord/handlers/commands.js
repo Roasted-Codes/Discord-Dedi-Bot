@@ -22,7 +22,7 @@ export async function handleCommand(interaction, client) {
   try {
     if (!interaction.deferred && !interaction.replied) {
       await interaction.deferReply(
-        interaction.commandName === 'create'
+        ['create', 'destroy'].includes(interaction.commandName)
           ? { flags: MessageFlags.Ephemeral }
           : undefined
       );

@@ -15,6 +15,7 @@ import {
 } from './snapshotSpecs.js';
 import { instanceState } from '../state/instanceState.js';
 import { logger } from '../utils/logger.js';
+import { listCompleteInstanceInventory } from '../services/vultrInventory.js';
 
 // Cache the current server ID to avoid repeated metadata calls
 let currentServerInstanceId = null;
@@ -78,7 +79,9 @@ async function verifyFirewallAttached(instanceId, firewallGroupId, { attempts = 
   return null;
 }
 
-async function deleteInstanceAndWait(instanceId, { attempts = 24, intervalMs = 5000 } = {}) {
+// Security exception: only firewall verification failure may bypass server locks.
+// The instance is deleted before provisioning succeeds so it cannot remain publicly exposed.
+async function deleteUnsafeInstanceAfterFirewallFailure(instanceId, { attempts = 24, intervalMs = 5000 } = {}) {
   try {
     await vultr.instances.deleteInstance({ "instance-id": instanceId });
   } catch (error) {
@@ -216,28 +219,44 @@ export async function getAnyInstance(instanceId) {
 /**
  * List all instances (excluding the current server and EXCLUDE_SNAPSHOT_ID)
  */
+async function filterManageableInstances(instances) {
+  const filteredInstances = [];
+  for (const instance of instances) {
+    const isCurrent = await isCurrentServer(instance.id);
+    if (!isCurrent) {
+      filteredInstances.push(instance);
+    }
+  }
+
+  if (config.exclude.snapshotId) {
+    return filteredInstances.filter(instance => instance.snapshot_id !== config.exclude.snapshotId);
+  }
+
+  return filteredInstances;
+}
+
 export async function listInstances() {
   try {
     const response = await vultr.instances.listInstances();
-    let instances = response.instances || [];
-
-    const filteredInstances = [];
-    for (const instance of instances) {
-      const isCurrent = await isCurrentServer(instance.id);
-      if (!isCurrent) {
-        filteredInstances.push(instance);
-      }
-    }
-    instances = filteredInstances;
-
-    if (config.exclude.snapshotId) {
-      const filtered = instances.filter(instance => instance.snapshot_id !== config.exclude.snapshotId);
-      return filtered;
-    }
-
-    return instances;
+    return filterManageableInstances(response.instances || []);
   } catch (error) {
     logger.error('Error listing instances:', error.message);
+    throw error;
+  }
+}
+
+/**
+ * List every manageable instance across the complete Vultr inventory.
+ */
+export async function listCompleteInstances() {
+  try {
+    const instances = await listCompleteInstanceInventory(
+      params => vultr.instances.listInstances(params)
+    );
+
+    return filterManageableInstances(instances);
+  } catch (error) {
+    logger.error('Error listing complete instance inventory:', error.message);
     throw error;
   }
 }
@@ -302,14 +321,6 @@ export async function stopInstanceApi(instanceId) {
  */
 export async function rebootInstanceApi(instanceId) {
   await vultr.instances.rebootInstance({ "instance-id": instanceId });
-}
-
-/**
- * Delete an instance
- */
-export async function deleteInstance(instanceId) {
-  await vultr.instances.deleteInstance({ "instance-id": instanceId });
-  return true;
 }
 
 /**
@@ -541,7 +552,7 @@ export async function createInstanceFromSnapshot(snapshotId, label, region, opti
   const verifiedInstance = await verifyFirewallAttached(instanceId, firewallGroupId);
 
   if (!verifiedInstance) {
-    const deleteConfirmed = await deleteInstanceAndWait(instanceId);
+    const deleteConfirmed = await deleteUnsafeInstanceAfterFirewallFailure(instanceId);
     const error = new Error(
       deleteConfirmed
         ? 'SECURITY FAILURE: Firewall could not be attached. Instance deletion confirmed.'

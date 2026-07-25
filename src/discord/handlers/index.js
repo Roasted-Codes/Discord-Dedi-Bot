@@ -52,7 +52,11 @@ export function setupHandlers(client) {
 // Re-export individual handlers
 export { handleAutocomplete } from './autocomplete.js';
 export { handleCommand } from './commands.js';
-export { handleSelectMenu, setDestructionPollingFunction } from './selectMenus.js';
+export {
+  handleSelectMenu,
+  setDestructionPollingFunction,
+  setServerLockPanelFunction
+} from './selectMenus.js';
 export { handleButton, setPanelExecutors } from './buttons.js';
 export {
   handleModal,
