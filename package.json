@@ -14,7 +14,8 @@
     "vultr:whoami": "node scripts/vultr-whoami.js",
     "identity:dry-run": "node scripts/dry-run-server-identity.js",
     "create:dry-run": "node scripts/dry-run-create-request.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "xlink:audit": "node scripts/xlink-name-audit.js",
+    "test": "node --test"
   },
   "keywords": [
     "discord",
@@ -27,7 +28,7 @@
   "license": "ISC",
   "dependencies": {
     "@vultr/vultr-node": "^2.8.0",
-    "discord.js": "^14.18.0",
+    "discord.js": "14.27.0",
     "dotenv": "^16.4.7"
   }
 }

@@ -8,12 +8,111 @@
 import { vultr, fetch } from './client.js';
 import { config } from '../config/index.js';
 import { DEDI_SNAPSHOT_CHOICES } from '../config/snapshots.js';
+import {
+  formatSnapshotSourceSpec,
+  getSnapshotSpec,
+  recordSnapshotSpec
+} from './snapshotSpecs.js';
 import { instanceState } from '../state/instanceState.js';
 import { logger } from '../utils/logger.js';
+import { listCompleteInstanceInventory } from '../services/vultrInventory.js';
 
 // Cache the current server ID to avoid repeated metadata calls
 let currentServerInstanceId = null;
 const configuredSnapshotIds = new Set(DEDI_SNAPSHOT_CHOICES.map(snapshot => snapshot.id));
+
+const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+const configuredSnapshotsById = new Map(DEDI_SNAPSHOT_CHOICES.map(snapshot => [snapshot.id, snapshot]));
+
+function isNotFoundError(error) {
+  const status = error?.response?.status || error?.status || error?.statusCode;
+  const message = String(error?.message || '').toLowerCase();
+  return status === 404 || message.includes('404') || message.includes('not found');
+}
+
+async function verifyFirewallAttached(instanceId, firewallGroupId, { attempts = 24, intervalMs = 5000 } = {}) {
+  let lastFirewallGroupId = null;
+
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    if (attempt > 1) {
+      try {
+        await vultr.instances.updateInstance({
+          "instance-id": instanceId,
+          "firewall_group_id": firewallGroupId
+        });
+      } catch (error) {
+        logger.debug(`Firewall attach retry ${attempt} update failed:`, error.message);
+      }
+    }
+
+    try {
+      const verify = await vultr.instances.getInstance({ "instance-id": instanceId });
+      lastFirewallGroupId = verify?.instance?.firewall_group_id || null;
+
+      if (lastFirewallGroupId === firewallGroupId) {
+        logger.debug(`Firewall verified on ${instanceId.slice(0, 8)}...`);
+        return verify.instance;
+      }
+
+      logger.debug(
+        `Firewall verify attempt ${attempt}/${attempts} for ${instanceId.slice(0, 8)}... ` +
+        `saw ${lastFirewallGroupId || 'none'}`
+      );
+    } catch (error) {
+      if (isNotFoundError(error)) {
+        logger.debug(`Firewall verify stopped because ${instanceId.slice(0, 8)}... no longer exists`);
+        return null;
+      }
+
+      logger.debug(`Firewall verify attempt ${attempt}/${attempts} failed:`, error.message);
+    }
+
+    if (attempt < attempts) {
+      await wait(intervalMs);
+    }
+  }
+
+  logger.warn(
+    `Firewall did not verify for ${instanceId.slice(0, 8)}... after ${attempts} attempts ` +
+    `(last value: ${lastFirewallGroupId || 'none'})`
+  );
+  return null;
+}
+
+// Security exception: only firewall verification failure may bypass server locks.
+// The instance is deleted before provisioning succeeds so it cannot remain publicly exposed.
+async function deleteUnsafeInstanceAfterFirewallFailure(instanceId, { attempts = 24, intervalMs = 5000 } = {}) {
+  try {
+    await vultr.instances.deleteInstance({ "instance-id": instanceId });
+  } catch (error) {
+    if (isNotFoundError(error)) {
+      return true;
+    }
+
+    logger.warn(`Delete request failed for unprotected instance ${instanceId.slice(0, 8)}...: ${error.message}`);
+    return false;
+  }
+
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      await vultr.instances.getInstance({ "instance-id": instanceId });
+    } catch (error) {
+      if (isNotFoundError(error)) {
+        logger.info(`Confirmed deletion of unprotected instance ${instanceId.slice(0, 8)}...`);
+        return true;
+      }
+
+      logger.debug(`Delete verify attempt ${attempt}/${attempts} failed:`, error.message);
+    }
+
+    if (attempt < attempts) {
+      await wait(intervalMs);
+    }
+  }
+
+  logger.error(`Could not confirm deletion of unprotected instance ${instanceId.slice(0, 8)}...`);
+  return false;
+}
 
 /**
  * Auto-detect the current server instance to prevent self-destruction
@@ -66,7 +165,7 @@ export async function isCurrentServer(instanceId) {
     return true;
   }
 
-  if (config.exclude.instanceId === instanceId) {
+  if (config.exclude.instanceIds?.includes(instanceId)) {
     return true;
   }
 
@@ -120,28 +219,44 @@ export async function getAnyInstance(instanceId) {
 /**
  * List all instances (excluding the current server and EXCLUDE_SNAPSHOT_ID)
  */
+async function filterManageableInstances(instances) {
+  const filteredInstances = [];
+  for (const instance of instances) {
+    const isCurrent = await isCurrentServer(instance.id);
+    if (!isCurrent) {
+      filteredInstances.push(instance);
+    }
+  }
+
+  if (config.exclude.snapshotId) {
+    return filteredInstances.filter(instance => instance.snapshot_id !== config.exclude.snapshotId);
+  }
+
+  return filteredInstances;
+}
+
 export async function listInstances() {
   try {
     const response = await vultr.instances.listInstances();
-    let instances = response.instances || [];
-
-    const filteredInstances = [];
-    for (const instance of instances) {
-      const isCurrent = await isCurrentServer(instance.id);
-      if (!isCurrent) {
-        filteredInstances.push(instance);
-      }
-    }
-    instances = filteredInstances;
-
-    if (config.exclude.snapshotId) {
-      const filtered = instances.filter(instance => instance.snapshot_id !== config.exclude.snapshotId);
-      return filtered;
-    }
-
-    return instances;
+    return filterManageableInstances(response.instances || []);
   } catch (error) {
     logger.error('Error listing instances:', error.message);
+    throw error;
+  }
+}
+
+/**
+ * List every manageable instance across the complete Vultr inventory.
+ */
+export async function listCompleteInstances() {
+  try {
+    const instances = await listCompleteInstanceInventory(
+      params => vultr.instances.listInstances(params)
+    );
+
+    return filterManageableInstances(instances);
+  } catch (error) {
+    logger.error('Error listing complete instance inventory:', error.message);
     throw error;
   }
 }
@@ -188,9 +303,9 @@ export async function waitForInstanceStatus(instanceId, targetPowerStatus, timeo
 /**
  * Start an instance
  */
-export async function startInstanceApi(instanceId) {
+export async function startInstanceApi(instanceId, timeout) {
   await vultr.instances.startInstance({ "instance-id": instanceId });
-  return await waitForInstanceStatus(instanceId, 'running');
+  return await waitForInstanceStatus(instanceId, 'running', timeout);
 }
 
 /**
@@ -206,14 +321,6 @@ export async function stopInstanceApi(instanceId) {
  */
 export async function rebootInstanceApi(instanceId) {
   await vultr.instances.rebootInstance({ "instance-id": instanceId });
-}
-
-/**
- * Delete an instance
- */
-export async function deleteInstance(instanceId) {
-  await vultr.instances.deleteInstance({ "instance-id": instanceId });
-  return true;
 }
 
 /**
@@ -251,6 +358,30 @@ export function isBotManagedSnapshot(snapshot) {
     description.toLowerCase().includes('#public') ||
     configuredSnapshotIds.has(snapshot.id) ||
     cleanName.includes('realonesv2');
+}
+
+export function getSnapshotRestoreSpec(snapshotId, options = {}) {
+  const recordedSpec = getSnapshotSpec(snapshotId);
+  const configuredSnapshot = configuredSnapshotsById.get(snapshotId) || null;
+  const plan = options.plan ||
+    recordedSpec?.source?.plan ||
+    configuredSnapshot?.plan ||
+    config.vultr.plan;
+  const planSource = options.plan
+    ? 'override'
+    : recordedSpec?.source?.plan
+      ? 'snapshot-source'
+      : configuredSnapshot?.plan
+        ? 'configured-snapshot'
+        : 'default';
+
+  return {
+    plan,
+    planSource,
+    recordedSpec,
+    configuredSnapshot,
+    sourceSummary: formatSnapshotSourceSpec(recordedSpec)
+  };
 }
 
 /**
@@ -291,11 +422,25 @@ export async function getPublicSnapshots() {
 /**
  * Create a snapshot from a running instance
  */
-export async function createSnapshotFromInstance(instanceId, description) {
+export async function createSnapshotFromInstance(instanceId, description, options = {}) {
+  const sourceInstance = options.sourceInstance || await getAnyInstance(instanceId);
   const response = await vultr.snapshots.createSnapshot({
     "instance_id": instanceId,
     "description": description
   });
+
+  if (response.snapshot?.id) {
+    try {
+      recordSnapshotSpec(response.snapshot, sourceInstance, {
+        description,
+        visibility: options.visibility || null,
+        recordedBy: options.recordedBy || 'dedi-bot'
+      });
+    } catch (error) {
+      logger.warn(`Snapshot spec recording failed for ${response.snapshot.id.slice(0, 8)}...: ${error.message}`);
+    }
+  }
+
   return response.snapshot;
 }
 
@@ -371,18 +516,21 @@ export async function createInstanceFromSnapshot(snapshotId, label, region, opti
     throw new Error(`Invalid snapshot_id format: "${snapshotId}"`);
   }
 
-  // Verify snapshot exists
   const snapshots = await getSnapshots();
-  if (!snapshots.some(snap => snap.id === snapshotId)) {
+  const snapshot = snapshots.find(snap => snap.id === snapshotId);
+  if (!snapshot) {
     throw new Error(`Snapshot ${snapshotId} not found.`);
   }
+
+  const restoreSpec = getSnapshotRestoreSpec(snapshotId, options);
 
   // Create instance
   const createPayload = {
     "snapshot_id": snapshotId,
     "label": label,
     "region": region || config.vultr.region,
-    "plan": config.vultr.plan
+    "plan": restoreSpec.plan,
+    "firewall_group_id": firewallGroupId
   };
 
   if (options.userData) {
@@ -396,37 +544,23 @@ export async function createInstanceFromSnapshot(snapshotId, label, region, opti
   }
 
   const instanceId = response.instance.id;
-  logger.info(`Instance created: ${instanceId.slice(0, 8)}...`);
+  logger.info(
+    `Instance created: ${instanceId.slice(0, 8)}... ` +
+    `(snapshot ${snapshotId.slice(0, 8)}..., plan ${restoreSpec.plan}, ${restoreSpec.planSource})`
+  );
 
-  // Attach firewall with retries
-  let firewallAttached = false;
-  for (let i = 0; i < 10; i++) {
-    try {
-      await vultr.instances.updateInstance({
-        "instance-id": instanceId,
-        "firewall_group_id": firewallGroupId
-      });
+  const verifiedInstance = await verifyFirewallAttached(instanceId, firewallGroupId);
 
-      await new Promise(resolve => setTimeout(resolve, 3000));
-      const verify = await vultr.instances.getInstance({ "instance-id": instanceId });
-
-      if (verify?.instance?.firewall_group_id === firewallGroupId) {
-        firewallAttached = true;
-        logger.debug(`Firewall attached to ${instanceId.slice(0, 8)}...`);
-        break;
-      }
-    } catch (e) {
-      logger.debug(`Firewall attach attempt ${i + 1} failed:`, e.message);
-      await new Promise(resolve => setTimeout(resolve, 5000));
-    }
-  }
-
-  if (!firewallAttached) {
-    // Destroy unprotected instance
-    try {
-      await vultr.instances.deleteInstance({ "instance-id": instanceId });
-    } catch (e) { /* ignore */ }
-    throw new Error('SECURITY FAILURE: Firewall could not be attached. Instance destroyed.');
+  if (!verifiedInstance) {
+    const deleteConfirmed = await deleteUnsafeInstanceAfterFirewallFailure(instanceId);
+    const error = new Error(
+      deleteConfirmed
+        ? 'SECURITY FAILURE: Firewall could not be attached. Instance deletion confirmed.'
+        : 'SECURITY FAILURE: Firewall could not be attached. Instance deletion could not be confirmed; XLink assignment kept for manual cleanup.'
+    );
+    error.instanceId = instanceId;
+    error.keepXlinkAssignment = !deleteConfirmed;
+    throw error;
   }
 
   // Try to enable DDOS protection (non-fatal)
@@ -439,7 +573,7 @@ export async function createInstanceFromSnapshot(snapshotId, label, region, opti
     logger.debug('DDOS protection not available:', e.message);
   }
 
-  return response.instance;
+  return verifiedInstance;
 }
 
 /**

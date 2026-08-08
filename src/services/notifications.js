@@ -8,6 +8,100 @@ import { MessageFlags } from 'discord.js';
 import { AUTO_CLEANUP_DEFAULT_MS } from '../config/constants.js';
 import { logger } from '../utils/logger.js';
 
+const DEFAULT_SELKIES_DIRECT_URL_TEMPLATE = 'https://{ipDash}.sslip.io';
+const DEFAULT_SELKIES_CENTRAL_URL_TEMPLATE = 'https://{serverHost}.dedi.halo2stats.org';
+const DEFAULT_XLINK_URL_TEMPLATE = 'http://{ip}:34522';
+const messageCleanupTimers = new Map();
+
+export function scheduleMessageCleanup(
+  message,
+  {
+    deleteAfterMs = AUTO_CLEANUP_DEFAULT_MS,
+    setTimeoutFn = setTimeout,
+    clearTimeoutFn = clearTimeout
+  } = {}
+) {
+  if (!message || typeof message.delete !== 'function') return null;
+
+  const key = message.id || message;
+  const previousTimer = messageCleanupTimers.get(key);
+  if (previousTimer) clearTimeoutFn(previousTimer);
+
+  let timer;
+  timer = setTimeoutFn(async () => {
+    if (messageCleanupTimers.get(key) === timer) {
+      messageCleanupTimers.delete(key);
+    }
+    try {
+      await message.delete();
+    } catch (error) {
+      // Message may already be deleted.
+    }
+  }, deleteAfterMs);
+  messageCleanupTimers.set(key, timer);
+  return timer;
+}
+
+function dnsSafeLabel(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 63);
+}
+
+function renderConnectionUrlTemplate(template, details = {}) {
+  const normalizedTemplate = String(template || '').trim();
+  if (!normalizedTemplate) {
+    return null;
+  }
+
+  const values = {
+    ip: details.ip || '',
+    ipDash: details.ip ? String(details.ip).replace(/\./g, '-') : '',
+    serverId: details.serverId || '',
+    serverHost: dnsSafeLabel(details.serverHost || details.serverId || details.serverName),
+    serverName: details.serverName || '',
+    hostname: details.hostname || '',
+    friendlyHostname: details.friendlyHostname || ''
+  };
+  let missingValue = false;
+
+  const rendered = normalizedTemplate.replace(/\{([A-Za-z0-9_]+)\}/g, (match, key) => {
+    if (!Object.prototype.hasOwnProperty.call(values, key)) {
+      return match;
+    }
+
+    if (!values[key]) {
+      missingValue = true;
+    }
+
+    return values[key];
+  });
+
+  return missingValue ? null : rendered;
+}
+
+export function buildSelkiesUrl(details = {}) {
+  const defaultTemplate = process.env.SELKIES_CENTRAL_PROXY_ENABLED === '1' ||
+    process.env.SELKIES_OAUTH_ENABLED === '1'
+    ? DEFAULT_SELKIES_CENTRAL_URL_TEMPLATE
+    : DEFAULT_SELKIES_DIRECT_URL_TEMPLATE;
+
+  return renderConnectionUrlTemplate(
+    process.env.SELKIES_URL_TEMPLATE || defaultTemplate,
+    details
+  );
+}
+
+export function buildXlinkUrl(details = {}) {
+  return renderConnectionUrlTemplate(
+    process.env.XLINK_URL_TEMPLATE || DEFAULT_XLINK_URL_TEMPLATE,
+    details
+  );
+}
+
 /**
  * Send a follow-up message (ephemeral by default)
  *
@@ -34,23 +128,34 @@ export async function sendAutoCleanupFollowUp(
 
     const followUp = await interaction.followUp(options);
 
-    // Schedule deletion
-    setTimeout(async () => {
-      try {
-        await followUp.delete();
-      } catch (error) {
-        // Message may already be deleted
-      }
-    }, deleteAfterMs);
+    scheduleMessageCleanup(followUp, { deleteAfterMs });
 
     return followUp;
   } catch (error) {
-    if (error.code === 10062) {
-      logger.debug('Interaction expired');
+    if (error.code === 10062 || error.code === 50027) {
+      logger.debug('Interaction webhook expired');
       return null;
     }
     throw error;
   }
+}
+
+/**
+ * Delete the original interaction reply after a bounded delay.
+ */
+export function scheduleInteractionReplyCleanup(
+  interaction,
+  { deleteAfterMs = AUTO_CLEANUP_DEFAULT_MS, setTimeoutFn = setTimeout } = {}
+) {
+  return setTimeoutFn(async () => {
+    try {
+      await interaction.deleteReply();
+    } catch (error) {
+      if (![10008, 10062, 50027].includes(error.code)) {
+        logger.debug('Failed to delete interaction reply:', error.message);
+      }
+    }
+  }, deleteAfterMs);
 }
 
 /**
@@ -59,21 +164,33 @@ export async function sendAutoCleanupFollowUp(
 export async function sendServerCreationDM(user, details) {
   try {
     const { serverName, serverId, hostname, friendlyHostname, snapshotLabel, region, ip, elapsedMinutes } = details;
+    const selkiesUrl = buildSelkiesUrl(details);
+    const xlinkUrl = buildXlinkUrl(details);
     const identityLines = [
       serverId ? `> Server ID: \`${serverId}\`` : null,
       hostname ? `> Hostname: \`${hostname}\`` : null,
       friendlyHostname ? `> Friendly Name: \`${friendlyHostname}\`` : null,
       snapshotLabel ? `> Snapshot: \`${snapshotLabel}\`` : null
     ].filter(Boolean).join('\n');
+    const connectionLines = [
+      selkiesUrl ? `> Selkies: ${selkiesUrl}` : null,
+      xlinkUrl ? `> XLink Kai: ${xlinkUrl}` : null,
+      ip ? `> IP Address: \`${ip}\`` : null
+    ].filter(Boolean).join('\n');
+    const selkiesLoginLines = [
+      details.selkiesUsername ? `> Username: \`${details.selkiesUsername}\`` : null,
+      details.selkiesPassword ? `> Password: \`${details.selkiesPassword}\`` : null
+    ].filter(Boolean).join('\n');
+    const showSelkiesPassword = process.env.SELKIES_OAUTH_ENABLED !== '1' &&
+      process.env.SELKIES_CENTRAL_PROXY_ENABLED !== '1';
 
     const message =
       `**Your Server is Ready!**\n\n` +
       `Server "${serverName}" is now running in ${region.toUpperCase()}!\n\n` +
       (identityLines ? `**Identity:**\n${identityLines}\n\n` : '') +
       `**Connection Details:**\n` +
-      `> Linux Remote Desktop: https://${ip}:8080\n` +
-      `> Xlink Kai: http://${ip}:34522\n` +
-      `> IP Address: \`${ip}\`\n\n` +
+      `${connectionLines}\n\n` +
+      (showSelkiesPassword && selkiesLoginLines ? `**Selkies Login:**\n${selkiesLoginLines}\n\n` : '') +
       `Setup time: ${elapsedMinutes} minutes\n` +
       `Don't forget to use /destroy when you're done!`;
 

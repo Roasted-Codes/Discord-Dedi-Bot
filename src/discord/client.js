@@ -20,7 +20,8 @@ import {
   TextInputBuilder,
   TextInputStyle,
   MessageFlags,
-  AttachmentBuilder
+  AttachmentBuilder,
+  Events
 } from 'discord.js';
 
 /**
@@ -54,5 +55,6 @@ export {
   TextInputBuilder,
   TextInputStyle,
   MessageFlags,
-  AttachmentBuilder
+  AttachmentBuilder,
+  Events
 };

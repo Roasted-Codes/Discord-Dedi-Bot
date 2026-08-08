@@ -9,23 +9,29 @@ function getArg(name, fallback) {
   return match ? match.slice(prefix.length) : fallback;
 }
 
+function defaultCityLabel(region) {
+  const cityLabels = {
+    dfw: 'Dallas'
+  };
+  return cityLabels[String(region || '').toLowerCase()] || String(region || '').toUpperCase();
+}
+
+const xlinkXtag = getArg('xlink-xtag', 'walshy_server');
 const identity = createServerIdentity({
-  gamertag: getArg('gamertag', undefined),
+  serverId: xlinkXtag,
+  displayName: xlinkXtag,
   sequence: getArg('sequence', '1'),
   region: getArg('region', process.env.VULTR_REGION || 'dfw'),
   creator: getArg('creator', process.env.USER || 'dry-run'),
-  domain: getArg('domain', process.env.REALONES_DOMAIN || 'realones.gg')
+  domain: getArg('domain', process.env.REALONES_DOMAIN || '')
 });
-const xlinkXtag = getArg('xlink-xtag', '');
-const xlinkPassword = getArg('xlink-password', xlinkXtag ? 'dry-run-password' : '');
-const cityLabel = getArg('city-label', identity.region.toUpperCase());
+const xlinkPassword = getArg('xlink-password', 'dry-run-password');
+const cityLabel = getArg('city-label', defaultCityLabel(identity.region));
 const xlinkEnv = buildXlinkEnv({
-  credentials: xlinkXtag
-    ? {
-        username: xlinkXtag,
-        password: xlinkPassword
-      }
-    : null,
+  credentials: {
+    username: xlinkXtag,
+    password: xlinkPassword
+  },
   cityLabel
 });
 

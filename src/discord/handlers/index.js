@@ -18,23 +18,28 @@ export function setupHandlers(client) {
   client.on('interactionCreate', async interaction => {
     try {
       if (interaction.isAutocomplete()) {
-        return handleAutocomplete(interaction);
+        await handleAutocomplete(interaction);
+        return;
       }
 
       if (interaction.isCommand()) {
-        return handleCommand(interaction, client);
+        await handleCommand(interaction, client);
+        return;
       }
 
       if (interaction.isStringSelectMenu()) {
-        return handleSelectMenu(interaction);
+        await handleSelectMenu(interaction);
+        return;
       }
 
       if (interaction.isButton()) {
-        return handleButton(interaction);
+        await handleButton(interaction);
+        return;
       }
 
       if (interaction.isModalSubmit()) {
-        return handleModal(interaction);
+        await handleModal(interaction);
+        return;
       }
 
       logger.debug(`Unhandled interaction type: ${interaction.type}`);
@@ -47,11 +52,14 @@ export function setupHandlers(client) {
 // Re-export individual handlers
 export { handleAutocomplete } from './autocomplete.js';
 export { handleCommand } from './commands.js';
-export { handleSelectMenu, setDestructionPollingFunction, setQuickCreateWithTimerFunction } from './selectMenus.js';
+export {
+  handleSelectMenu,
+  setDestructionPollingFunction,
+  setServerLockPanelFunction
+} from './selectMenus.js';
 export { handleButton, setPanelExecutors } from './buttons.js';
 export {
   handleModal,
   setModalPanelFunction,
-  setModalQuickCreateFunction,
   setModalManualRestoreFunction
 } from './modals.js';

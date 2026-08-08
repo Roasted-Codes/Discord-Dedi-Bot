@@ -8,6 +8,7 @@
 import { createCommand } from './create.js';
 import { destroyCommand } from './destroy.js';
 import { snapshotCommand } from './snapshot.js';
+import { snapshotPrepCommand } from './snapshotPrep.js';
 import { panelCommand } from './panel.js';
 
 // All commands in array format for easy iteration
@@ -15,6 +16,7 @@ export const commands = [
   createCommand,
   destroyCommand,
   snapshotCommand,
+  snapshotPrepCommand,
   panelCommand
 ];
 
@@ -33,5 +35,6 @@ export {
   createCommand,
   destroyCommand,
   snapshotCommand,
+  snapshotPrepCommand,
   panelCommand
 };

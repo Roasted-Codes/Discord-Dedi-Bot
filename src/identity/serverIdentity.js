@@ -46,36 +46,41 @@ export function pickGamertag({ pool = HALO2_PRO_GAMERTAGS, random = Math.random 
 }
 
 export function createServerIdentity({
+  serverId,
+  displayName,
   gamertag,
   sequence = 1,
   region = 'dfw',
   creator = 'unknown',
-  domain = 'realones.gg'
+  domain = ''
 } = {}) {
-  const displayName = String(gamertag || pickGamertag()).trim();
-  const slug = slugifyGamertag(displayName);
+  const exactServerId = String(serverId || '').trim();
+  const identityDisplayName = String(displayName || exactServerId || gamertag || pickGamertag()).trim();
+  const slug = slugifyGamertag(exactServerId || identityDisplayName);
   if (!slug) {
-    throw new Error(`Invalid gamertag for server identity: ${gamertag}`);
+    throw new Error(`Invalid server identity name: ${serverId || displayName || gamertag}`);
   }
   const paddedSequence = formatSequence(sequence);
-  const serverId = `r1v2-${slug}-${paddedSequence}`;
+  const resolvedServerId = exactServerId || `r1v2-${slug}-${paddedSequence}`;
+  const resolvedDomain = String(domain || '').trim().replace(/^\.+|\.+$/g, '');
+  const resolvedHostname = resolvedDomain ? `${slug}.${resolvedDomain}` : '';
 
   return {
-    display_name: displayName,
-    server_id: serverId,
-    hostname: `${serverId}.${domain}`,
-    friendly_hostname: `${slug}.${domain}`,
+    display_name: identityDisplayName,
+    server_id: resolvedServerId,
+    hostname: resolvedHostname,
+    friendly_hostname: resolvedHostname,
     region,
     creator,
     would_create_vultr: false,
     env: {
-      REALONES_SERVER_ID: serverId,
-      REALONES_DISPLAY_NAME: displayName,
+      REALONES_SERVER_ID: resolvedServerId,
+      REALONES_DISPLAY_NAME: identityDisplayName,
       REALONES_SERVER_SLUG: slug,
       REALONES_SERVER_SEQUENCE: paddedSequence,
       REALONES_REGION: region,
-      REALONES_HOSTNAME: `${serverId}.${domain}`,
-      REALONES_FRIENDLY_HOSTNAME: `${slug}.${domain}`,
+      REALONES_HOSTNAME: resolvedHostname,
+      REALONES_FRIENDLY_HOSTNAME: resolvedHostname,
       REALONES_CREATOR: creator
     }
   };

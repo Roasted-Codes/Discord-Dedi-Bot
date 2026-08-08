@@ -10,14 +10,22 @@ import { instanceState } from '../../state/instanceState.js';
 import { logger } from '../../utils/logger.js';
 import { createServerIdentity, getNextServerSequence } from '../../identity/serverIdentity.js';
 import { buildVultrUserData } from '../../identity/cloudInit.js';
-import { getDediSnapshotChoice, getDediSnapshotDiscordChoices } from '../../config/snapshots.js';
+import {
+  formatDediSnapshotDescription,
+  getDediSnapshotChoice,
+  getDediSnapshotDiscordChoices
+} from '../../config/snapshots.js';
 import {
   assignXlinkAccount,
   buildXlinkEnv,
   redactXlinkCredentials,
   releaseXlinkAssignment,
+  syncXlinkAssignmentsWithInstances,
   updateXlinkAssignmentInstance
 } from '../../xlink/credentials.js';
+import { buildSelkiesAccess, buildSelkiesEnv } from '../../selkies/access.js';
+import { scheduleInteractionReplyCleanup } from '../../services/notifications.js';
+import { CREATE_REPLY_CLEANUP_MS } from '../../config/constants.js';
 
 // This will be set by the main entry point
 let startInstanceStatusPolling = null;
@@ -61,10 +69,35 @@ async function resolveCityLabel(regionId) {
   return String(regionId || '').toUpperCase();
 }
 
+async function syncXlinkAssignmentsBeforeAssign() {
+  const vultrInstances = await listInstances();
+  await syncXlinkAssignmentsWithInstances(vultrInstances);
+}
+
+async function handleCreateFailureXlinkCleanup(error, identity) {
+  if (error.keepXlinkAssignment && error.instanceId) {
+    try {
+      await updateXlinkAssignmentInstance(identity.server_id, error.instanceId);
+      logger.warn(`Kept XLink assignment ${identity.server_id} for unconfirmed instance ${error.instanceId.slice(0, 8)}...`);
+    } catch (updateError) {
+      logger.error('Failed to pin XLink assignment to unconfirmed instance:', updateError.message);
+    }
+    return;
+  }
+
+  await releaseXlinkAssignment({ serverId: identity.server_id });
+}
+
 export const createCommand = {
   data: new SlashCommandBuilder()
     .setName('create')
     .setDescription('Create a new game server')
+    .addStringOption(option =>
+      option
+        .setName('snapshot')
+        .setDescription('Snapshot image to create from (optional - defaults to Classic V2)')
+        .setRequired(false)
+        .addChoices(...getDediSnapshotDiscordChoices()))
     .addStringOption(option =>
       option
         .setName('name')
@@ -75,42 +108,42 @@ export const createCommand = {
         .setName('city')
         .setDescription('City to create server in (optional - defaults to Dallas)')
         .setRequired(false)
-        .setAutocomplete(true))
-    .addStringOption(option =>
-      option
-        .setName('snapshot')
-        .setDescription('Snapshot to use (optional - defaults to Classic)')
-        .setRequired(false)
-        .addChoices(...getDediSnapshotDiscordChoices())),
+        .setAutocomplete(true)),
 
   async execute(interaction) {
     try {
-      const requestedName = interaction.options.getString('name');
       const selectedCity = interaction.options.getString('city') || 'dfw';
-      const snapshotChoice = getDediSnapshotChoice(interaction.options.getString('snapshot'));
+      const selectedSnapshot = interaction.options.getString('snapshot') || undefined;
+      const snapshotChoice = getDediSnapshotChoice(selectedSnapshot);
+      const snapshotDescription = formatDediSnapshotDescription(snapshotChoice);
 
       await interaction.editReply(`Creating your ${snapshotChoice.label} server...`);
 
+      const cityLabel = await resolveCityLabel(selectedCity);
+      await syncXlinkAssignmentsBeforeAssign();
+      const xlink = await assignXlinkAccount({
+        region: selectedCity,
+        cityLabel,
+        creator: interaction.user.username,
+        creatorId: interaction.user.id,
+        snapshotId: snapshotChoice.id,
+        snapshotLabel: snapshotChoice.label
+      });
       const identity = createServerIdentity({
-        gamertag: requestedName || undefined,
+        serverId: xlink.assignment.server_id,
+        displayName: xlink.assignment.xtag,
         sequence: await getNextIdentitySequence(),
         region: selectedCity,
         creator: interaction.user.username,
-        domain: process.env.REALONES_DOMAIN || 'realones.gg'
+        domain: process.env.REALONES_DOMAIN || ''
       });
       const serverName = identity.display_name;
-      const cityLabel = await resolveCityLabel(selectedCity);
-
-      const xlink = await assignXlinkAccount({
-        serverId: identity.server_id,
-        region: selectedCity,
-        cityLabel,
-        creator: interaction.user.username
-      });
       const xlinkEnv = buildXlinkEnv({
         credentials: xlink.credentials,
         cityLabel
       });
+      const selkiesAccess = buildSelkiesAccess();
+      const selkiesEnv = buildSelkiesEnv(selkiesAccess);
 
       let instance;
       try {
@@ -118,10 +151,10 @@ export const createCommand = {
           snapshotChoice.id,
           identity.server_id,
           selectedCity,
-          { userData: buildVultrUserData(identity, { extraEnv: xlinkEnv }) }
+          { userData: buildVultrUserData(identity, { extraEnv: { ...xlinkEnv, ...selkiesEnv } }) }
         );
       } catch (error) {
-        await releaseXlinkAssignment({ serverId: identity.server_id });
+        await handleCreateFailureXlinkCleanup(error, identity);
         throw error;
       }
 
@@ -151,11 +184,14 @@ export const createCommand = {
           hostname: identity.hostname,
           friendlyHostname: identity.friendly_hostname,
           realonesSequence: identity.env.REALONES_SERVER_SEQUENCE,
+          timerMinutes: 0,
           snapshotKey: snapshotChoice.key,
           snapshotId: snapshotChoice.id,
           snapshotLabel: snapshotChoice.label,
           xlinkXtag: xlink.assignment.xtag,
-          xlinkCityLabel: cityLabel
+          xlinkCityLabel: cityLabel,
+          selkiesUsername: selkiesAccess.username,
+          selkiesPassword: selkiesAccess.password
         }
       );
 
@@ -164,9 +200,12 @@ export const createCommand = {
         `Server "${serverName}" creation started in ${selectedCity.toUpperCase()}!\n` +
         `Server ID: \`${identity.server_id}\`\n` +
         `Snapshot: \`${snapshotChoice.label}\`\n` +
+        `Snapshot notes: ${snapshotDescription}\n` +
+        `Timer: \`none\`\n` +
         `XLink Xtag: \`${redactedXlink.username}\`\n` +
-        `XLink arena description: \`RealOnesV2 - ${cityLabel}\`\n` +
+        `XLink arena description: \`${xlinkEnv.XLINK_PRIVATE_ARENA_DESCRIPTION}\`\n` +
         `XLink auto-login: configured\n` +
+        `Selkies login: configured\n` +
         `Please be patient - server creation typically takes 15 minutes.\n` +
         `Checking status automatically...\n` +
         `Tip: The server will be ready when its status shows as "running"\n` +
@@ -177,6 +216,9 @@ export const createCommand = {
       if (startInstanceStatusPolling) {
         startInstanceStatusPolling(instance.id, serverName, selectedCity, interaction, initialMessage);
       }
+      scheduleInteractionReplyCleanup(interaction, {
+        deleteAfterMs: CREATE_REPLY_CLEANUP_MS
+      });
 
     } catch (error) {
       logger.error('Create command failed:', error.message);
